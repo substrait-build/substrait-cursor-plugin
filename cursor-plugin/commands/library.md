@@ -19,7 +19,10 @@ The bundled scripts live in this plugin's `scripts/` directory. Resolve the plug
 scripts from there.
 
 Reads need an **account link** (personal access token). If a call fails with 401/403,
-run `/substrait:login` and complete the account authorization first.
+run `/substrait:login` and complete the account authorization first. Company APIs are
+**brokered at runtime** by the platform (the app never holds their credentials), and a
+builder with the data owner's **development access** can call them read-only from here
+to see real responses while designing.
 
 1. **Fetch the catalog:** run `bash <plugin>/scripts/substrait-library.sh list`
    (optional filters: `--q <term>`, `--tag <tag>`). The output is JSON — parse it and
@@ -42,16 +45,33 @@ run `/substrait:login` and complete the account authorization first.
      OpenAPI document, or hasn't redeployed since spec storage shipped) — say so and
      reason from the endpoint summaries instead, clearly flagged as inference.
 
-3. **Design the app together.** Iterate with the user until the design is concrete:
+3. **See what the API really returns — if the user has development access.** The spec
+   is the design-time truth; the live API is the truth. Before locking field names,
+   check whether the user may call the API from the editor:
+   `… substrait-library.sh show internal <slug>` carries `development_access` (absent =
+   never asked; `pending`; `approved` with `expires_at`; `rejected` with the owner's
+   message). When approved, fetch a real sample of each endpoint the design leans on:
+   `… substrait-library.sh call <slug> GET <path-from-the-spec> [--out .substrait/samples/<name>.json]`
+   The body is the API's, verbatim; one status line goes to stderr. Read it to confirm
+   shapes — never paste production records into code, fixtures or commit messages, and
+   never try a write (development access is read-only by design; the script refuses).
+   When there is no access yet, offer to ask for it and keep designing from the spec:
+   `… substrait-library.sh request <slug> --reason "<what the app does with the data, read/write, how often>"`
+   The data owner decides (7 / 30 / 90 days); the user gets an email either way.
+
+4. **Design the app together.** Iterate with the user until the design is concrete:
    - which library APIs it consumes, and which specific endpoints;
    - data flow: what the app stores in its own database vs fetches live;
-   - configuration: one env var per consumed API base URL, plus whatever credentials
-     each entry's `auth_notes` describes. **The platform brokers nothing at runtime** —
-     the app calls these APIs directly, and the user configures credentials as env
-     vars on the app's Settings page after deploy (secrets belong in
-     `backend/.env.example` with a `# secret` marker, never in code).
+   - configuration: **company (`internal`) APIs are brokered** — the app calls them at
+     `$SUBSTRAIT_EGRESS_URL/<entry-slug>/…` with `$SUBSTRAIT_EGRESS_TOKEN`, both injected
+     by the platform once the data owner approves the *app*, so **never design an env
+     var to hold that API's key, secret or base URL**. Other Substrait apps (`app`
+     entries) are still called directly at their base URL, in a custom env var. The app's
+     own secrets belong in `backend/.env.example` with a `# secret` marker, never in code.
+     Note the two grants are separate: the user's development access (step 3) does not
+     give the app access — that is requested on the app's **Access** tab after deploy.
    - what the app itself exposes (its own API + frontend).
 
-4. **Build and ship.** When the user is happy with the design, use the `substrait-app`
+5. **Build and ship.** When the user is happy with the design, use the `substrait-app`
    skill to scaffold and implement it (the design maps onto the standard backend +
    frontend + migrations layout), then `/substrait:link` and `/substrait:deploy`.

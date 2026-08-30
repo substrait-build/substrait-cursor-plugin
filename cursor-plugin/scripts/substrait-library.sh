@@ -12,6 +12,20 @@
 #                                    so they work even when the app is SSO-gated.
 #                                    --out writes it to FILE instead of stdout
 #
+# Development access — calling an internal API for real, from the editor, so the
+# response shape you build against is the actual one and not a guess from the spec:
+#
+#   request SLUG --reason "..."      ask the API's data owner for development access
+#                                    (a PERSON's grant: read-only, expires, 7/30/90
+#                                    days at the owner's choice). ≥10 characters.
+#   access                           your own development access, every state
+#   call SLUG [METHOD] PATH          one real request through the platform, which
+#        [--accept TYPE] [--out FILE] attaches the credential you never see. METHOD is
+#                                    GET (default), HEAD or OPTIONS — never a write.
+#                                    PATH is the API's own path, query string
+#                                    included. Body to stdout (or FILE); one status
+#                                    line to stderr. Every call is recorded.
+#
 # Output is the API's JSON body untouched — the calling agent parses JSON natively,
 # and the pure-shell _json_field helper can't walk arrays anyway.
 #
@@ -108,9 +122,127 @@ cmd_spec() {
   fi
 }
 
+# _json_str — a JSON string literal from a shell value. Escapes backslash, quote, tab,
+# CR and newline; enough for a reason, a path or a media type. Line-by-line so it stays
+# within what BSD sed (macOS) and GNU sed both do — no \r escapes, no label loops.
+_json_str() {
+  local out="" line first=1 tab cr
+  tab="$(printf '\t')"; cr="$(printf '\r')"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+      -e "s/$tab/\\\\t/g" -e "s/$cr/\\\\r/g")"
+    if [ $first -eq 1 ]; then out="$line"; first=0; else out="$out\\n$line"; fi
+  done <<EOF
+$1
+EOF
+  printf '"%s"' "$out"
+}
+
+# _detail — the portal's {detail} out of an error body, or the body itself.
+_detail() { printf '%s' "$1" | _json_field detail 2>/dev/null || printf '%s' "$1"; }
+
+cmd_request() {
+  local slug="${1:-}"; shift || true
+  [ -n "$slug" ] || die "usage: request SLUG --reason \"why you need it\""
+  local reason=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reason) reason="${2:-}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ "${#reason}" -ge 10 ] || die "--reason must be at least 10 characters — it is the whole basis of the data owner's decision"
+  local body
+  body="{\"entry_slug\":$(_json_str "$slug"),\"reason\":$(_json_str "$reason")}"
+  substrait_call POST /api/grants/development -H 'Content-Type: application/json' --data "$body" || exit $?
+  case "${SUBSTRAIT_STATUS:-}" in
+    201)
+      echo "Requested development access to '$slug'. The data owner decides it; you'll get an email either way." >&2
+      echo "Until then, design from the spec — 'call' will say when access is live." >&2
+      printf '%s\n' "$SUBSTRAIT_BODY" ;;
+    409)
+      echo "Not sent — $(_detail "$SUBSTRAIT_BODY")" >&2; exit 1 ;;
+    404)
+      echo "No API '$slug' is available to your account (it may be hidden by a data group you don't hold — ask your org admin)." >&2; exit 1 ;;
+    *)
+      _check_auth
+      echo "Request failed (HTTP ${SUBSTRAIT_STATUS:-?}): $SUBSTRAIT_BODY" >&2; exit 1 ;;
+  esac
+}
+
+cmd_access() {
+  substrait_call GET /api/grants/mine || exit $?
+  if [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
+    _check_auth
+    echo "Could not list your development access (HTTP ${SUBSTRAIT_STATUS:-?}): $SUBSTRAIT_BODY" >&2
+    exit 1
+  fi
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+cmd_call() {
+  local slug="${1:-}"; shift || true
+  [ -n "$slug" ] || die "usage: call SLUG [GET|HEAD|OPTIONS] PATH [--accept TYPE] [--out FILE]"
+  local method="GET" path="" accept="" out=""
+  case "${1:-}" in
+    GET|HEAD|OPTIONS) method="$1"; shift ;;
+    POST|PUT|PATCH|DELETE)
+      die "development access is read-only: $1 is refused. Only GET, HEAD and OPTIONS may be made from the editor." ;;
+  esac
+  path="${1:-}"; shift || true
+  [ -n "$path" ] || die "usage: call SLUG [GET|HEAD|OPTIONS] PATH — PATH is the API's own path from its spec, e.g. /2.0/shippers?limit=1"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --accept) accept="${2:-}"; shift 2 ;;
+      --out)    out="${2:-}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  local body
+  body="{\"method\":\"$method\",\"path\":$(_json_str "$path")"
+  [ -n "$accept" ] && body="$body,\"accept\":$(_json_str "$accept")"
+  body="$body}"
+  local hdrs; hdrs="$(mktemp)" || die "mktemp failed"
+  substrait_call POST "/api/library/internal/$slug/call" -H 'Content-Type: application/json' \
+    --data "$body" -D "$hdrs" || { rc=$?; rm -f "$hdrs"; exit $rc; }
+  case "${SUBSTRAIT_STATUS:-}" in
+    200) ;;
+    403)
+      rm -f "$hdrs"
+      echo "Refused: $(_detail "$SUBSTRAIT_BODY")" >&2
+      echo "(Check where you stand with: substrait-library.sh access)" >&2; exit 1 ;;
+    404) rm -f "$hdrs"; echo "Not callable: $(_detail "$SUBSTRAIT_BODY")" >&2; exit 1 ;;
+    429) rm -f "$hdrs"; echo "Slow down: $(_detail "$SUBSTRAIT_BODY")" >&2; exit 1 ;;
+    422) rm -f "$hdrs"; echo "Bad request: $SUBSTRAIT_BODY" >&2; exit 1 ;;
+    502) rm -f "$hdrs"; echo "The platform could not complete the call: $(_detail "$SUBSTRAIT_BODY")" >&2; exit 1 ;;
+    *)
+      rm -f "$hdrs"; _check_auth
+      echo "Call failed (HTTP ${SUBSTRAIT_STATUS:-?}): $SUBSTRAIT_BODY" >&2; exit 1 ;;
+  esac
+  # 200 from the PLATFORM means it completed the call. What the API itself said rides
+  # in X-Upstream-*; the body is the API's, verbatim, so the agent reads it exactly as
+  # the app would. One status line to stderr keeps stdout clean for parsing.
+  _hdr() { grep -i "^$1:" "$hdrs" | head -1 | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+  local ustatus ums ubytes utrunc utype
+  ustatus="$(_hdr X-Upstream-Status)"; ums="$(_hdr X-Upstream-Elapsed-Ms)"
+  ubytes="$(_hdr X-Upstream-Bytes)"; utrunc="$(_hdr X-Upstream-Truncated)"
+  utype="$(_hdr Content-Type)"
+  rm -f "$hdrs"
+  echo "$method $path → HTTP ${ustatus:-?} · ${ums:-?} ms · ${utype:-?} · ${ubytes:-?} bytes$([ "$utrunc" = "true" ] && printf ' · TRUNCATED at 1 MiB')" >&2
+  if [ -n "$out" ]; then
+    printf '%s\n' "$SUBSTRAIT_BODY" > "$out" || die "could not write $out"
+    echo "Wrote the response body to $out." >&2
+  else
+    printf '%s\n' "$SUBSTRAIT_BODY"
+  fi
+}
+
 case "${1:-list}" in
-  list) shift || true; cmd_list "$@" ;;
-  show) shift; cmd_show "$@" ;;
-  spec) shift; cmd_spec "$@" ;;
-  *) die "unknown command: ${1}. Use list|show|spec." ;;
+  list)    shift || true; cmd_list "$@" ;;
+  show)    shift; cmd_show "$@" ;;
+  spec)    shift; cmd_spec "$@" ;;
+  request) shift; cmd_request "$@" ;;
+  access)  shift || true; cmd_access "$@" ;;
+  call)    shift; cmd_call "$@" ;;
+  *) die "unknown command: ${1}. Use list|show|spec|request|access|call." ;;
 esac

@@ -79,6 +79,45 @@ A refusal from the gateway is plain text and says which of these it is: an unrec
 token, no approved grant, or no upstream credential configured. Surface it rather than
 retrying.
 
+### Seeing real responses while you build — development access
+
+The spec says what an endpoint returns; the API says what it *actually* returns, and
+the two differ often enough that building blind is how integrations ship with the wrong
+field names. So a **person** — not an app — can be granted **development access** by
+the same data owner, and then call the API from the editor through the platform:
+
+```
+substrait-library.sh access                       # your development access, every state
+substrait-library.sh request <slug> --reason "…"  # ask the data owner (≥10 characters)
+substrait-library.sh call <slug> GET /2.0/shippers?limit=1
+substrait-library.sh call <slug> GET /2.0/shippers/2 --out .substrait/samples/shipper.json
+```
+
+`call` prints the response body on stdout exactly as the API sent it, and one status
+line on stderr (`GET /2.0/shippers?limit=1 → HTTP 200 · 412 ms · application/json ·
+6595 bytes`). Read it the way you would read the spec — to learn the real shape — and
+prefer `--out` plus grep for anything large. The platform attaches the credential;
+you never see it, and every call is recorded against your account.
+
+What development access is, so you set expectations correctly:
+
+- **Read-only.** `GET`, `HEAD` and `OPTIONS` only. A write is refused before it leaves
+  the platform, whatever the grant says. Do not try to work around this; if the design
+  needs a write verified, that is a conversation with the data owner, not a call.
+- **Time-boxed.** The owner grants 7, 30 or 90 days (30 by default). When it lapses,
+  `call` says so and `request` asks again.
+- **Scoped like the spec.** You can only call operations your account can *see* —
+  the same data-group rule that shapes `show` and `spec`. An operation that is not in
+  the spec, or is hidden from you, answers 404 either way.
+- **Production data.** These are the real base URLs. Treat what comes back as you
+  would treat production records — use it to learn shapes, never paste it into code,
+  fixtures or commit messages.
+
+Ask for it early — the owner is a person and may take a day — and keep designing from
+the spec in the meantime. `show internal <slug>` carries `development_access` with
+your current state (`pending`, `approved` with `expires_at`, `rejected` with the
+owner's message), so you do not need a failed call to find out.
+
 ### `app` entries — called directly
 
 Another Substrait app's API is **not** brokered. Call it directly at its
