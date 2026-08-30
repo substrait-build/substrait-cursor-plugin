@@ -1,11 +1,12 @@
 # The API Library — designing apps against existing APIs
 
-The Substrait portal serves a **design-time catalog** of APIs an app can be built
-against. It has two kinds of entries:
+The Substrait portal serves a catalog of APIs an app can be built against — and, for
+company APIs, brokers the credentials to call them. It has two kinds of entries:
 
 - **`internal`** — company APIs registered by platform admins. Each entry carries a
-  name, slug, description, tags, a base URL, `auth_notes` (how a human gets access —
-  documentation, never credentials) and a full **OpenAPI spec**.
+  name, slug, description, tags, a base URL, `auth_notes` (how the API authenticates and
+  who owns it — documentation, never credentials) and a full **OpenAPI spec**. Apps call
+  these **through the platform gateway**, never directly; see *Calling a library API*.
 - **`app`** — deployed Substrait apps: an endpoint inventory (method/path/description
   for every route the app serves), its `https://<slug>.apps.substrait.build` base URL,
   and — when the post-deploy harvest captured one (`has_full_spec: true`) — the app's
@@ -38,26 +39,63 @@ served specs drop them, and an entry whose whole inventory is grouped away answe
 API or endpoint you cannot see, say the library doesn't list it for this account
 and suggest they check with their org admin — don't retry or treat it as an outage.
 
-## The design-time contract
+## Calling a library API
 
-The library informs *design*; the platform brokers nothing at runtime:
+The two kinds of entry are called in **two different ways**, and getting them the wrong
+way round is the mistake to avoid.
 
-- The deployed app calls library APIs **directly** over the network, exactly as any
-  client would.
-- Every consumed API's base URL belongs in a **custom env var** (declared in
-  `backend/.env.example`), never hardcoded — the library's `base_url` is the
-  production default the user configures at deploy time.
-- Credentials come from the entry's `auth_notes` process (ask the owning team, mint a
-  key, etc.) and are configured by the user as **secret env vars** on the app's
-  Settings page (`# secret` in `.env.example`). Never bake them into code or the zip.
-- Other Substrait apps' APIs may sit behind that app's Google SSO proxy; check with
-  the app's owner whether a service path is available before designing against it.
+### `internal` entries — brokered through the platform gateway
+
+Company APIs are never called with a credential the app holds. The app calls the
+platform's egress gateway, and the gateway attaches the real credential on its behalf:
+
+```
+GET $SUBSTRAIT_EGRESS_URL/<entry-slug>/<the API's own path>
+Authorization: Bearer $SUBSTRAIT_EGRESS_TOKEN
+```
+
+Both variables are injected by the platform. **Do not declare them in
+`backend/.env.example`** — they are reserved, and a declaration is *silently ignored*
+rather than refused: the deploy succeeds and the variable simply never appears, which
+is a much harder thing to debug than an error would be.
+
+So, when you design against an internal entry:
+
+- **Never design an env var to hold that API's key, token, client secret, or base URL.**
+  There is nothing for the user to paste. If you find yourself writing
+  `ORDERS_API_KEY=  # secret`, you have designed the pre-brokering shape by mistake.
+- Build the URL from `$SUBSTRAIT_EGRESS_URL` plus the entry slug plus the path from the
+  spec. The entry's own `base_url` is documentation — the gateway holds the real one.
+- `auth_notes` describes how the API authenticates and who owns it. It is context for
+  the design conversation, not instructions for the app to follow.
+
+**Access must be granted before any call works.** The app needs an approved grant for
+that entry, and until then every call is refused with a message saying so. The user
+requests it on the app's **Access** tab in the portal (or you can raise it for them),
+and the API's data owner approves. Tell the user this is needed — an app that builds
+fine and then 403s at the gateway looks like a bug when it is really a pending approval.
+
+A refusal from the gateway is plain text and says which of these it is: an unrecognised
+token, no approved grant, or no upstream credential configured. Surface it rather than
+retrying.
+
+### `app` entries — called directly
+
+Another Substrait app's API is **not** brokered. Call it directly at its
+`https://<slug>.apps.substrait.build` base URL, which belongs in a custom env var in
+`backend/.env.example` as it always did. Note it may sit behind that app's Google SSO
+proxy — check with the app's owner whether a service path exists before designing
+against it.
 
 ## Designing an app from the library
 
 1. `list` the catalog and shortlist entries relevant to what the user wants to build.
 2. `show` the shortlisted entries; read `auth_notes` and the endpoint summaries.
 3. Agree the design with the user: endpoints consumed, what the app stores in its own
-   per-app database vs fetches live, env vars (one base URL + credentials per API),
-   and the app's own API/frontend surface.
+   per-app database vs fetches live, and the app's own API/frontend surface. Env vars
+   only for `app` entries' base URLs — internal APIs need none, because the gateway
+   holds their credentials.
 4. Scaffold and implement per this skill's deploy contract, then link and deploy.
+5. For each internal API consumed, make sure access is requested and approved — the
+   app deploys happily without it and then gets refused at the gateway, so raise it
+   as part of shipping rather than leaving the user to discover it.

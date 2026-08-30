@@ -1,6 +1,6 @@
 ---
 name: substrait-app
-version: 2026.08.11.220000
+version: 2026.08.28.075855
 description: Build apps that deploy on the Substrait platform via upload mode (GitHub-connected apps deploy from their pushed branch with the same commands — no zip). Use whenever the user asks to build, scaffold, or package an app "for Substrait", "to upload to Substrait", or for the Substrait upload/deploy contract. The zip contains app code plus its Dockerfile(s): a backend that serves GET /health on port 8000 with its API under /api (any language or framework — the scaffold uses FastAPI) and a cicd/Dockerfile.backend, plus Flyway migrations, and an optional frontend served on port 80 (any framework — the scaffold uses React + Vite + Tailwind) with a cicd/Dockerfile.frontend. The platform generates only the Kubernetes manifests, so you never write k8s or deal with the app slug.
 ---
 
@@ -81,6 +81,12 @@ environment, never commit them:
 - **Per declared backing service** (see next section): **`REDIS_URL`**, **`KAFKA_BROKERS`**,
   **`QDRANT_URL`**, **`OBJECT_STORAGE_BUCKET`** — injected **only** when the service is
   declared in `substrait.yaml`.
+- **`SUBSTRAIT_EGRESS_URL`** / **`SUBSTRAIT_EGRESS_TOKEN`** — injected once a data owner
+  approves the app for a company API in the API Library. Together they are how the app
+  calls that API: the platform holds the real credential and attaches it. Both are
+  RESERVED: declaring either in `.env.example` is silently ignored (the deploy still
+  succeeds, the variable just never appears), so do not declare them and do not expect
+  an error to tell you. See *The API Library* below.
 
 Whatever the stack, the database is whichever engine the manifest declares — use its
 driver (a **MySQL** driver for `oceanbase`), and keep all schema in Flyway migrations
@@ -371,10 +377,11 @@ inventory — and, once an app has deployed with a servable spec, its full OpenA
 too (`spec app <slug>`; works even for SSO-gated apps, whose public `/openapi.json`
 is unreachable). Browse it with `/substrait:library` (or `substrait-library.sh
 list|show|spec`) to discover what data already exists and design an app that consumes
-it. The contract is design-time only: the app calls those APIs directly, base URLs and
-credentials arrive as user-configured env vars (`backend/.env.example`, secrets marked
-`# secret`) — the platform brokers nothing at runtime. Full guide:
-`reference/api-library.md`.
+it. Company APIs are **brokered**: once a data owner approves the app, it calls them
+through the platform gateway at `$SUBSTRAIT_EGRESS_URL/<entry-slug>/…` with
+`$SUBSTRAIT_EGRESS_TOKEN`, and the platform attaches the real credential — so never
+design an env var to hold one. Other Substrait apps are still called directly. Full
+guide: `reference/api-library.md`.
 
 ## Project memory (CLAUDE.md)
 
