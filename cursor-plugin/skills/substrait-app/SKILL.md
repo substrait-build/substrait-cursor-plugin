@@ -372,10 +372,13 @@ the copy-paste-ready FastAPI + React scaffold.
 ## The API Library (designing against existing APIs)
 
 The portal keeps a design-time **API Library**: admin-registered company APIs (with
-full OpenAPI specs and access notes) plus every deployed Substrait app's endpoint
-inventory — and, once an app has deployed with a servable spec, its full OpenAPI doc
+full OpenAPI specs and access notes) plus deployed Substrait apps' endpoint
+inventories — and, once an app has deployed with a servable spec, its full OpenAPI doc
 too (`spec app <slug>`; works even for SSO-gated apps, whose public `/openapi.json`
-is unreachable). Browse it with `/substrait:library` (or `substrait-library.sh
+is unreachable). What an account sees is governed by the org's **data groups**: an
+operation in no group the account holds is absent, so an org that hasn't grouped
+anything shows an empty catalog to ordinary accounts — an admin publishes endpoints
+by grouping and granting them; an empty list is not an outage. Browse it with `/substrait:library` (or `substrait-library.sh
 list|show|spec`) to discover what data already exists and design an app that consumes
 it. Company APIs are **brokered**: once a data owner approves the app, it calls them
 through the platform gateway at `$SUBSTRAIT_EGRESS_URL/<entry-slug>/…` with

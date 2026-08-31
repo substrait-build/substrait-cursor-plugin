@@ -10,7 +10,8 @@ company APIs, brokers the credentials to call them. It has two kinds of entries:
 - **`app`** — deployed Substrait apps: an endpoint inventory (method/path/description
   for every route the app serves), its `https://<slug>.apps.substrait.build` base URL,
   and — when the post-deploy harvest captured one (`has_full_spec: true`) — the app's
-  full OpenAPI spec. These appear automatically once an app deploys.
+  full OpenAPI spec. An app's entry exists once it deploys, but its endpoints
+  are **published only through data groups** — see *Browsing it* below.
 
 ## Browsing it
 
@@ -31,13 +32,17 @@ rather than printing it. For app entries, `spec app SLUG` serves the doc the pla
 harvested from the running app — use it instead of fetching the app's public
 `/openapi.json`, which is gated behind Google SSO for SSO-enabled apps.
 
-Note the catalogue is **scoped by the org's data groups**: orgs can restrict
-sensitive operations (endpoint + method) to members who hold the covering group,
-and operations you don't hold are simply absent — lists omit them, counts shrink,
-served specs drop them, and an entry whose whole inventory is grouped away answers
-404 on `show`/`spec`, exactly like a slug that never existed. If the user names an
-API or endpoint you cannot see, say the library doesn't list it for this account
-and suggest they check with their org admin — don't retry or treat it as an outage.
+Note the catalogue is **published through the org's data groups**: an operation
+(endpoint + method) is visible only to members who hold a group that names it, and
+an operation in **no group is hidden from everyone** except platform admins — for
+company APIs and deployed apps alike, deploying or registering publishes nothing by
+itself. Operations you don't hold are simply absent — lists omit them, counts shrink,
+served specs drop them, and an entry whose whole inventory is hidden answers 404 on
+`show`/`spec`, exactly like a slug that never existed. If the user names an API or
+endpoint you cannot see — or the catalog comes back empty in an org that has deployed
+apps — say the library doesn't list it for this account and suggest an org admin add
+the operations to a data group the account holds; don't retry or treat it as an
+outage.
 
 ## Calling a library API
 
