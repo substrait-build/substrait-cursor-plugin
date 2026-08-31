@@ -57,7 +57,11 @@ to see real responses while designing.
    never try a write (development access is read-only by design; the script refuses).
    When there is no access yet, offer to ask for it and keep designing from the spec:
    `… substrait-library.sh request <slug> --reason "<what the app does with the data, read/write, how often>"`
-   The data owner decides (7 / 30 / 90 days); the user gets an email either way.
+   — the grant rides on a **data group** (approval covers every operation the group
+   names); usually resolved automatically, but a 409 listing several groups means
+   re-running with `--group <id>` from that list.
+   The data owner decides (30 or 60 days — every grant carries this clock); the
+   user gets an email either way.
 
 4. **Design the app together.** Iterate with the user until the design is concrete:
    - which library APIs it consumes, and which specific endpoints;

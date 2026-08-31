@@ -42,7 +42,9 @@ served specs drop them, and an entry whose whole inventory is hidden answers 404
 endpoint you cannot see — or the catalog comes back empty in an org that has deployed
 apps — say the library doesn't list it for this account and suggest an org admin add
 the operations to a data group the account holds; don't retry or treat it as an
-outage.
+outage. An API that is not in the library AT ALL can be proposed: the portal's app
+Access tab has a "Request an import" form (name + spec URL + reason), and a library
+curator decides — approval registers it, still unpublished until grouped.
 
 ## Calling a library API
 
@@ -93,10 +95,17 @@ the same data owner, and then call the API from the editor through the platform:
 
 ```
 substrait-library.sh access                       # your development access, every state
-substrait-library.sh request <slug> --reason "…"  # ask the data owner (≥10 characters)
+substrait-library.sh request <slug> --reason "…" [--group ID]  # ask the data owner (≥10 chars)
 substrait-library.sh call <slug> GET /2.0/shippers?limit=1
 substrait-library.sh call <slug> GET /2.0/shippers/2 --out .substrait/samples/shipper.json
 ```
+
+**Grants ride on data groups.** A request is anchored on the API you name, but what
+the owner approves is a **data group** — approval covers every operation that group
+names, this API's and any other it covers alike. Usually the group resolves
+automatically (your account holds exactly one group covering the API); if several
+cover it the request answers 409 listing them with ids — re-run with `--group <id>`.
+The same applies to an app's access request on its portal Access tab.
 
 `call` prints the response body on stdout exactly as the API sent it, and one status
 line on stderr (`GET /2.0/shippers?limit=1 → HTTP 200 · 412 ms · application/json ·
@@ -109,7 +118,8 @@ What development access is, so you set expectations correctly:
 - **Read-only.** `GET`, `HEAD` and `OPTIONS` only. A write is refused before it leaves
   the platform, whatever the grant says. Do not try to work around this; if the design
   needs a write verified, that is a conversation with the data owner, not a call.
-- **Time-boxed.** The owner grants 7, 30 or 90 days (30 by default). When it lapses,
+- **Time-boxed.** The owner grants 30 or 60 days (30 by default) — every data
+  authorisation carries this clock, an app's grant included. When it lapses,
   `call` says so and `request` asks again.
 - **Scoped like the spec.** You can only call operations your account can *see* —
   the same data-group rule that shapes `show` and `spec`. An operation that is not in

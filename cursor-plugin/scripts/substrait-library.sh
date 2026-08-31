@@ -16,7 +16,7 @@
 # response shape you build against is the actual one and not a guess from the spec:
 #
 #   request SLUG --reason "..."      ask the API's data owner for development access
-#                                    (a PERSON's grant: read-only, expires, 7/30/90
+#                                    (a PERSON's grant: read-only, expires, 30/60
 #                                    days at the owner's choice). ≥10 characters.
 #   access                           your own development access, every state
 #   call SLUG [METHOD] PATH          one real request through the platform, which
@@ -143,17 +143,27 @@ _detail() { printf '%s' "$1" | _json_field detail 2>/dev/null || printf '%s' "$1
 
 cmd_request() {
   local slug="${1:-}"; shift || true
-  [ -n "$slug" ] || die "usage: request SLUG --reason \"why you need it\""
-  local reason=""
+  [ -n "$slug" ] || die "usage: request SLUG --reason \"why you need it\" [--group ID]"
+  local reason="" group=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --reason) reason="${2:-}"; shift 2 ;;
+      # The grant rides on a DATA GROUP. Usually resolved automatically (you hold
+      # exactly one group covering the API); when several cover it the request
+      # answers 409 listing them with ids — re-run with --group <id>.
+      --group) group="${2:-}"; shift 2 ;;
       *) die "unknown option: $1" ;;
     esac
   done
   [ "${#reason}" -ge 10 ] || die "--reason must be at least 10 characters — it is the whole basis of the data owner's decision"
+  case "$group" in
+    "") : ;;
+    *[!0-9]*) die "--group takes the numeric group id (shown in the 409 that asked for it)" ;;
+  esac
   local body
-  body="{\"entry_slug\":$(_json_str "$slug"),\"reason\":$(_json_str "$reason")}"
+  body="{\"entry_slug\":$(_json_str "$slug"),\"reason\":$(_json_str "$reason")"
+  [ -n "$group" ] && body="$body,\"group_id\":$group"
+  body="$body}"
   substrait_call POST /api/grants/development -H 'Content-Type: application/json' --data "$body" || exit $?
   case "${SUBSTRAIT_STATUS:-}" in
     201)
@@ -161,7 +171,16 @@ cmd_request() {
       echo "Until then, design from the spec — 'call' will say when access is live." >&2
       printf '%s\n' "$SUBSTRAIT_BODY" ;;
     409)
-      echo "Not sent — $(_detail "$SUBSTRAIT_BODY")" >&2; exit 1 ;;
+      # Two different 409s: "already live/pending" (a plain-string detail) and
+      # "several data groups cover this API" (a detail OBJECT carrying the
+      # candidates). Print the raw body for the second so the group ids are
+      # visible to pass back via --group.
+      echo "Not sent — $(_detail "$SUBSTRAIT_BODY")" >&2
+      if printf '%s' "$SUBSTRAIT_BODY" | grep -q '"groups"'; then
+        echo "Pick the data group the grant should ride on and re-run with --group <id>:" >&2
+        printf '%s\n' "$SUBSTRAIT_BODY" >&2
+      fi
+      exit 1 ;;
     404)
       echo "No API '$slug' is available to your account (it may be hidden by a data group you don't hold — ask your org admin)." >&2; exit 1 ;;
     *)
