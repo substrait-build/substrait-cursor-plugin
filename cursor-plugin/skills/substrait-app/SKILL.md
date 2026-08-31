@@ -356,6 +356,9 @@ and point `DATABASE_URL` at it. See `reference/local-dev.md` for the full guide.
    `substrait-app contract` block, leave that block untouched (the plugin's link/deploy
    scripts own its updates).
 8. When asked to package: zip the project root, source only, ≤ 16 MB.
+9. After a deploy reports success, **verify the app actually works** — a green deploy
+   only means the image built and the pods started. If anything misbehaves, read the
+   runtime logs: see *When a deployed app misbehaves* below.
 
 > **GitHub-connected apps** (created in the portal via *Connect to GitHub*) never ship
 > a zip: `/substrait:deploy` *triggers* Substrait to pull the app's connected branch.
@@ -368,6 +371,62 @@ and point `DATABASE_URL` at it. See `reference/local-dev.md` for the full guide.
 See `reference/deploy-contract.md` for the full spec, `reference/local-dev.md` for running
 locally, `reference/object-storage.md` for the file bucket, and `reference/templates/` for
 the copy-paste-ready FastAPI + React scaffold.
+
+## When a deployed app misbehaves
+
+A successful deploy is not a working app. `PREVIEW_LIVE` means the image built, the
+migrations ran and the pods came up — it says nothing about whether requests succeed. When
+the user reports 500s, a blank page, a hanging request, or "my change didn't show up",
+**read the runtime logs before theorising**:
+
+```
+/substrait:logs                        # backend — where a 500 always originates
+/substrait:logs --component frontend   # the page itself: blank, 502, stale
+/substrait:logs --tail 300             # a traceback cut off at the default 100
+```
+
+This is a different tool from `/substrait:deploy --watch`. `--watch` follows a run and
+stops the moment it goes green, so it can only ever explain a *failed deploy*. Runtime
+faults happen after that, and are invisible to it.
+
+**Work the problem in this order.**
+
+1. **Check pod health first, before reading a single log line.** A pod marked
+   `NOT READY (CrashLoopBackOff)` alongside a `ready` one means the rollout is WEDGED: the
+   old ReplicaSet is still serving while the new one crashes on startup. The app looks
+   alive, the deploy reported success, and the user's latest code is **not live**. Say so
+   explicitly — it is the single most misleading state on the platform, and the user will
+   otherwise keep debugging code that was never deployed. `--- previous (terminated)
+   instance ---` means you are reading the log from just before the container died, which
+   is where a startup crash actually lives; a crashed container's current log is empty.
+2. **Read the traceback to the deepest frame inside the app** — a file under your own
+   source tree, not one inside FastAPI, uvicorn, Starlette or nginx. The top of a Python
+   traceback is always framework plumbing and tells you nothing. A 500 is virtually never
+   the framework's fault.
+3. **Open that file and line in the repo** and understand the actual failure before
+   proposing anything. Match the log's line numbers against the deployed code, not against
+   uncommitted local edits.
+4. **Fix the cause, then redeploy** with `/substrait:deploy`, and read the logs again to
+   confirm the error is gone rather than assuming it is.
+
+**Do not guess.** If the pods are healthy and the log shows nothing at the time of the
+failure, the request never reached the app — look at the caller, the path (is it under
+`/api`?), or the frontend's network tab instead of inventing a backend cause. Reporting
+"the logs show nothing at that time" is a real and useful answer.
+
+Two failure shapes worth recognising on sight, because both deploy green:
+
+- **`host not found in upstream "backend"`** (nginx, frontend crash-looping) — the
+  frontend's nginx config is proxying to a docker-compose service name. On the platform
+  `/api` is routed by the ingress and never reaches nginx, so that `upstream` block must
+  not be there at all. See *Frontend* above.
+- **A `TypeError` comparing values that came out of the database** — anything serialised
+  through JSON comes back as a string, including datetimes. Revive it before comparing, and
+  keep timezone-awareness consistent on both sides.
+
+Logs need an **account** credential, so `/substrait:logs` requires `/substrait:login`
+(a 401 here is not fixed by `/substrait:link`), and you can only read logs for an app you
+own or collaborate on.
 
 ## The API Library (designing against existing APIs)
 

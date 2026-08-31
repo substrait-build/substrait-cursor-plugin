@@ -13,6 +13,13 @@
 #   portal URL : $SUBSTRAIT_PORTAL_URL  ->  project config  ->  global config
 #                                       ->  the plugin's own userConfig (see below)
 #   token      : $SUBSTRAIT_TOKEN       ->  project config  ->  global config
+#
+# …EXCEPT for USER-SCOPED surfaces (the library, logs), which the server gates on a PAT
+# and refuses an sbd_ token outright. For those, project-first is exactly backwards: a
+# builder who has linked an app has a deploy token in the project config, so the
+# preference above would send it and earn a 401 no amount of /substrait:login can fix.
+# Those callers set SUBSTRAIT_REQUIRE_ACCOUNT=1 (or read substrait_account_token
+# directly), which skips the project layer entirely. See B-004.
 
 SUBSTRAIT_CONFIG_FILE="${SUBSTRAIT_CONFIG_FILE:-.substrait/config.json}"
 SUBSTRAIT_GLOBAL_CONFIG="${SUBSTRAIT_GLOBAL_CONFIG:-$HOME/.substrait/config.json}"
@@ -93,8 +100,23 @@ substrait_plugin_version() {
 }
 
 substrait_token() {
+  if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then substrait_account_token; return $?; fi
   if [ -n "${SUBSTRAIT_TOKEN:-}" ]; then printf '%s' "$SUBSTRAIT_TOKEN"; return 0; fi
   if _json_get "$SUBSTRAIT_CONFIG_FILE" token; then return 0; fi
+  _json_get "$SUBSTRAIT_GLOBAL_CONFIG" token
+}
+
+# substrait_account_token — the ACCOUNT credential (sbt_) only, skipping the project
+# config. For endpoints the server gates on a PAT: sending the project's sbd_ token
+# there is a guaranteed 401, and it is the DEFAULT resolution in any linked project,
+# which is what made /substrait:library unusable for linked apps (B-004).
+#
+# $SUBSTRAIT_TOKEN still wins when it is an account token — an explicit override should
+# work here too — but an sbd_ value in it is ignored rather than sent to certain failure.
+substrait_account_token() {
+  case "${SUBSTRAIT_TOKEN:-}" in
+    sbt_*) printf '%s' "$SUBSTRAIT_TOKEN"; return 0 ;;
+  esac
   _json_get "$SUBSTRAIT_GLOBAL_CONFIG" token
 }
 
@@ -119,7 +141,13 @@ substrait_call() {
   base="$(substrait_portal_url)" || {
     echo "No portal URL configured — run /substrait:login --portal-url <your Substrait API URL> (there is no default; you can also set it once as the plugin's 'Substrait portal URL' option)." >&2; return 2; }
   token="$(substrait_token)" || {
-    echo "No token configured — run /substrait:link." >&2; return 2; }
+    if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then
+      echo "This needs an ACCOUNT link — run /substrait:login. (A project deploy token" >&2
+      echo "can't be used here; it only authorizes deploys of its own app.)" >&2
+    else
+      echo "No token configured — run /substrait:link." >&2
+    fi
+    return 2; }
   # A personal token authenticates the USER; the target app must be named explicitly.
   # /api/deploy/* reads it from X-Substrait-App (the slug `link use` cached). Other
   # endpoints (e.g. /api/projects) ignore the extra header, so it's always safe to send.

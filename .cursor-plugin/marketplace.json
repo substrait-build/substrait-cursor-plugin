@@ -12,7 +12,7 @@
     {
       "name": "substrait",
       "source": "cursor-plugin",
-      "description": "Build and deploy apps on the Substrait platform from Cursor: the substrait-app skill plus /substrait:login, /substrait:logout, /substrait:link, /substrait:deploy, /substrait:env and /substrait:library.",
+      "description": "Build and deploy apps on the Substrait platform from Cursor: the substrait-app skill plus /substrait:login, /substrait:logout, /substrait:link, /substrait:deploy, /substrait:env, /substrait:logs and /substrait:library.",
       "author": {
         "name": "Substrait",
         "url": "https://app.substrait.build"

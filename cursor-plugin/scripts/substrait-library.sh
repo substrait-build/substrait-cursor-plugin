@@ -37,6 +37,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=substrait-common.sh
 . "$DIR/substrait-common.sh"
 
+# Every endpoint this script calls is PAT-gated, so resolve the ACCOUNT token and skip
+# the project config. Without this the default project-first order sends a linked app's
+# sbd_ deploy token and the server 401s — which made the library unusable in exactly the
+# projects most likely to browse it, and made the "run /substrait:login" hint below a
+# dead end for anyone who already had (B-004).
+export SUBSTRAIT_REQUIRE_ACCOUNT=1
+
 die() { echo "Error: $*" >&2; exit 1; }
 
 # URL-encode just enough for query values (space and the JSON-ish specials that could

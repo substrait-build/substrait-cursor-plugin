@@ -1,7 +1,7 @@
 {
   "name": "substrait",
-  "version": "2026.08.31.093141",
-  "description": "Build and deploy apps on the Substrait platform from Cursor. Bundles the substrait-app skill (scaffold apps to the upload/deploy contract) plus /substrait:login to authenticate your Substrait account and /substrait:logout to sign the machine out again, /substrait:link and /substrait:deploy to connect a local project to a Substrait app and ship it without leaving the editor, /substrait:env to manage the app's environment variables and secrets, and /substrait:library to browse the platform's API Library, design apps against existing APIs, and — with development access from the API's data owner — call them read-only from the editor to see real responses.",
+  "version": "2026.08.31.103924",
+  "description": "Build and deploy apps on the Substrait platform from Cursor. Bundles the substrait-app skill (scaffold apps to the upload/deploy contract) plus /substrait:login to authenticate your Substrait account and /substrait:logout to sign the machine out again, /substrait:link and /substrait:deploy to connect a local project to a Substrait app and ship it without leaving the editor, /substrait:env to manage the app's environment variables and secrets, /substrait:logs to read a deployed app's runtime logs when it misbehaves in production, and /substrait:library to browse the platform's API Library, design apps against existing APIs, and — with development access from the API's data owner — call them read-only from the editor to see real responses.",
   "author": {
     "name": "Substrait",
     "url": "https://app.substrait.build"
