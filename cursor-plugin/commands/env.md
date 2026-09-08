@@ -44,3 +44,12 @@ from there.
 
 6. **Report the outcome** — the script says whether the change was applied live or will
    land on the next deploy; relay that. On a 401/403, the fix is `/substrait:link`.
+
+## Deploy environments
+
+Each deploy environment of an app has its **own** variables and secrets. Every command
+takes `--env <name>` (e.g. `… substrait-env.sh --env staging list`); without it, production.
+`$SUBSTRAIT_ENV_TARGET` or an `"environment"` key in `.substrait/config.json` pins a default.
+Creating an environment in the portal copies production's non-secret variables; secrets
+are never copied, so set them per environment. A **protected** environment (production by
+default) accepts variable edits only from the app owner or an admin.

@@ -161,3 +161,31 @@ Note: for zip deploys the script enforces the 16 MB source-only limit and exclud
 `node_modules/`, `.venv/`, `dist/`, build output and `.git/`. If it reports the zip is
 too large, help the user find and exclude the offending large files rather than
 bypassing the check.
+
+## Deploy environments
+
+An app can have more than one **deploy environment** — `production` (the app's own
+instance) plus e.g. `staging` or `dev`, each with its own namespace, database, URL
+(`<slug>--<env>.<org>.apps.substrait.build`), variables and access settings. Environments
+are created on the app's page in the portal (the environment switcher under the header).
+
+- `--env <name>` deploys to that environment instead of production:
+  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" --env staging --watch`
+- The script refuses a name the app does not have; production needs no flag.
+- The same folder deploys to any environment — nothing in the code changes. The app can
+  read `SUBSTRAIT_ENV` (`production` | `preview`), `SUBSTRAIT_ENV_NAME` and `APP_URL`
+  at runtime.
+- A non-production environment's database is seeded from `backend/db/seed.sql` when the
+  file exists (applied on the first deploy, again only when the file changes, and again on
+  the first deploy after a database reset).
+  Production is never seeded.
+- **Promote** one environment's live build into another — the way staging reaches
+  production without a rebuild:
+  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promote --to production --from staging --watch`
+  `--from` defaults to the `--env` / pinned environment (else production). The target's
+  database is migrated from that build's tree first, then its images are copied into
+  the target's own repositories and rolled out. The target must have been deployed at
+  least once. A protected target (production by default) accepts this from the app
+  owner or an admin only — a collaborator gets a 403 with that explanation.
+- To pin a folder to an environment for every command, add `"environment": "staging"` to
+  `.substrait/config.json`; `$SUBSTRAIT_ENV_TARGET` works too. `--env` always wins.

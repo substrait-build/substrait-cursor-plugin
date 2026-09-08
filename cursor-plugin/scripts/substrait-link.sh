@@ -57,9 +57,11 @@ _PORTAL_REQUIRED_MSG="a portal URL is required — pass --portal-url <your Subst
 # _write_config PORTAL TOKEN [SLUG] [HOST] — write .substrait/config.json (0600) and
 # make sure .substrait/ is gitignored. SLUG/HOST are cached for friendlier messages.
 _write_config() {
-  local portal="$1" token="$2" slug="${3:-}" host="${4:-}" mode
-  # Preserve a recorded deploy-mode choice across rewrites (set-mode wrote it).
+  local portal="$1" token="$2" slug="${3:-}" host="${4:-}" mode env
+  # Preserve a recorded deploy-mode choice across rewrites (set-mode wrote it), and the
+  # folder's environment pin (an "environment" key the user added by hand).
   mode="$(_json_get "$SUBSTRAIT_CONFIG_FILE" deploy_mode 2>/dev/null)" || mode=""
+  env="$(_json_get "$SUBSTRAIT_CONFIG_FILE" environment 2>/dev/null)" || env=""
   mkdir -p .substrait
   umask 177
   # Build the JSON by hand (no python): these are values we control — a portal URL, an
@@ -68,6 +70,7 @@ _write_config() {
     [ -n "$slug" ] && printf ',\n  "slug": "%s"' "$slug"
     [ -n "$host" ] && printf ',\n  "host": "%s"' "$host"
     [ -n "$mode" ] && printf ',\n  "deploy_mode": "%s"' "$mode"
+    [ -n "$env" ] && printf ',\n  "environment": "%s"' "$env"
     printf '\n}\n'
   } > "$SUBSTRAIT_CONFIG_FILE"
   chmod 600 "$SUBSTRAIT_CONFIG_FILE"
@@ -94,7 +97,12 @@ _write_global_config() {
 # .substrait/ is gitignored like _write_config. A third arg DROPS any recorded
 # deploy_mode instead of preserving it.
 _write_project_ref() {
-  local slug="$1" host="${2:-}" reset="${3:-}" mode
+  local slug="$1" host="${2:-}" reset="${3:-}" mode env
+  # The environment pin follows the same rule as the mode: kept across rewrites, dropped
+  # when binding to a different app (a pin for the previous app says nothing about this one).
+  if [ -n "$reset" ]; then env=""
+  else env="$(_json_get "$SUBSTRAIT_CONFIG_FILE" environment 2>/dev/null)" || env=""
+  fi
   # Preserve a recorded deploy-mode choice across rewrites (_bind_project calls this
   # twice — slug-only, then again with the discovered host) — unless resetting, which is
   # what binding to an app does: a choice recorded for the PREVIOUS app says nothing
@@ -109,6 +117,7 @@ _write_project_ref() {
   { printf '{\n  "slug": "%s"' "$slug"
     [ -n "$host" ] && printf ',\n  "host": "%s"' "$host"
     [ -n "$mode" ] && printf ',\n  "deploy_mode": "%s"' "$mode"
+    [ -n "$env" ] && printf ',\n  "environment": "%s"' "$env"
     printf '\n}\n'
   } > "$SUBSTRAIT_CONFIG_FILE"
   chmod 600 "$SUBSTRAIT_CONFIG_FILE"
@@ -122,7 +131,8 @@ _write_project_ref() {
 # _write_deploy_mode MODE — record the project's chosen deploy path (upload|connect)
 # in the project config, preserving every other key. `/substrait:deploy` honors it.
 _write_deploy_mode() {
-  local mode="$1" portal token slug host
+  local mode="$1" portal token slug host env
+  env="$(_json_get "$SUBSTRAIT_CONFIG_FILE" environment 2>/dev/null)" || env=""
   portal="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url 2>/dev/null)" || portal=""
   token="$(_json_get "$SUBSTRAIT_CONFIG_FILE" token 2>/dev/null)" || token=""
   slug="$(_json_get "$SUBSTRAIT_CONFIG_FILE" slug 2>/dev/null)" || slug=""
@@ -134,6 +144,7 @@ _write_deploy_mode() {
     [ -n "$token" ] && printf ',\n  "token": "%s"' "$token"
     [ -n "$slug" ] && printf ',\n  "slug": "%s"' "$slug"
     [ -n "$host" ] && printf ',\n  "host": "%s"' "$host"
+    [ -n "$env" ] && printf ',\n  "environment": "%s"' "$env"
     printf '\n}\n'
   } > "$SUBSTRAIT_CONFIG_FILE"
   chmod 600 "$SUBSTRAIT_CONFIG_FILE"

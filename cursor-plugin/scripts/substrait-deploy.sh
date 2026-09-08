@@ -4,10 +4,20 @@
 # the server pulls the pushed branch, so the tree must be committed + pushed (gated
 # locally, verified server-side by SHA) — while every other app is packaged (source
 # only) and uploaded as a zip.
+#   --env <name>     deploy to that ENVIRONMENT of the app (e.g. staging) instead of
+#                    production. The environment must already exist (the portal's
+#                    environment switcher creates one). Also honoured: $SUBSTRAIT_ENV_TARGET
+#                    and an "environment" key in .substrait/config.json.
 #   --watch          poll the deploy until it finishes and print the preview URL
 #   --stack <name>   override the recorded backend stack (default: auto-detected from
 #                    backend/ — e.g. fastapi, python, node, go, rust, ruby, java, php,
 #                    dotnet). Ignored for connected apps (the platform detects it).
+#   promote --to <env> [--from <env>]
+#                    promote one environment's LIVE build into another (default --from:
+#                    the --env / pinned environment, else production): the target's
+#                    database is migrated from that build's tree, its images copied and
+#                    rolled out — no rebuild. A protected target (production) accepts
+#                    this from the app owner or an admin only. With --watch follows it.
 #   endpoints        submit .substrait/endpoints.json only, no deploy — legacy
 #                    inventory-only fallback (prefer a repo-root openapi.json,
 #                    which ships in the zip and is picked up server-side)
@@ -32,11 +42,19 @@ WATCH=0
 STACK=""
 ENDPOINTS_ONLY=0
 CHECK_ONLY=0
+PROMOTE=0; PROMOTE_TO=""; PROMOTE_FROM=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    promote) PROMOTE=1; shift ;;
+    --to) shift; PROMOTE_TO="${1:-}"; [ -n "$PROMOTE_TO" ] || die "--to needs an environment name (e.g. production)"; shift ;;
+    --to=*) PROMOTE_TO="${1#*=}"; shift ;;
+    --from) shift; PROMOTE_FROM="${1:-}"; [ -n "$PROMOTE_FROM" ] || die "--from needs an environment name (e.g. staging)"; shift ;;
+    --from=*) PROMOTE_FROM="${1#*=}"; shift ;;
     endpoints) ENDPOINTS_ONLY=1; shift ;;
     check) CHECK_ONLY=1; shift ;;
     --watch) WATCH=1; shift ;;
+    --env) shift; SUBSTRAIT_ENV_TARGET="${1:-}"; [ -n "$SUBSTRAIT_ENV_TARGET" ] || die "--env needs an environment name (e.g. staging)"; export SUBSTRAIT_ENV_TARGET; shift ;;
+    --env=*) SUBSTRAIT_ENV_TARGET="${1#*=}"; export SUBSTRAIT_ENV_TARGET; shift ;;
     --stack) shift; STACK="${1:-}"; [ -n "$STACK" ] || die "--stack needs a value (e.g. node, go, fastapi)"; shift ;;
     --stack=*) STACK="${1#*=}"; shift ;;
     *) die "unknown arg: $1" ;;
@@ -164,6 +182,45 @@ stamp_scaffold_version() {
   STAMP_CHANGED=1
   echo "Stamped scaffold_version $ver into substrait.yaml."
 }
+# --to/--from only mean something with the promote verb; without it the script would
+# otherwise fall through to packaging the working tree and uploading it — the opposite of
+# a promotion.
+if [ "$PROMOTE" -ne 1 ] && [ -n "$PROMOTE_TO$PROMOTE_FROM" ]; then
+  die "--to/--from need the promote subcommand: substrait-deploy.sh promote --to <environment> [--from <environment>]"
+fi
+if [ "$PROMOTE" -eq 1 ]; then
+  [ -n "$PROMOTE_TO" ] || die "usage: promote --to <environment> [--from <environment>] [--watch]"
+  src="${PROMOTE_FROM:-$(substrait_env_target 2>/dev/null)}"; src="${src:-production}"
+  src="$(printf '%s' "$src" | tr '[:upper:]' '[:lower:]')"
+  to="$(printf '%s' "$PROMOTE_TO" | tr '[:upper:]' '[:lower:]')"
+  echo "Promoting $src → $to (the live build of $src, no rebuild)…"
+  substrait_call POST /api/deploy/promote -H "Content-Type: application/json" \
+    --data "{\"from\":\"$src\",\"to\":\"$to\"}" || exit $?
+  case "${SUBSTRAIT_STATUS:-}" in
+    200|201|202) : ;;
+    403) die "not allowed: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
+    404|409) die "promotion not started: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
+    *) die "promotion failed (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY" ;;
+  esac
+  RUN_ID="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field run_id)" || RUN_ID=""
+  echo "Promotion queued (run $RUN_ID)."
+  if [ "$WATCH" -ne 1 ] || [ -z "$RUN_ID" ]; then
+    echo "Track it in the portal (the $to environment's deploy history)."
+    exit 0
+  fi
+  # Follow it with the same watch loop a deploy uses. The status/log reads must target
+  # the RUN's environment, so switch the header to the target; the packaging/upload
+  # section in between is skipped.
+  SUBSTRAIT_ENV_TARGET="$to"; export SUBSTRAIT_ENV_TARGET
+  run_id="$RUN_ID"
+  host=""
+  if substrait_call GET /api/deploy/app && [ "${SUBSTRAIT_STATUS:-}" = "200" ]; then
+    host="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field preview_hostname)" || host=""
+  fi
+  SKIP_TO_WATCH=1
+fi
+
+if [ "${SKIP_TO_WATCH:-0}" -ne 1 ]; then  # ── package + deploy (skipped for promote) ──
 stamp_scaffold_version
 
 echo "Checking Substrait compliance…"
@@ -187,10 +244,27 @@ fi
 # as a zip. An older backend reports no mode → zip path, where a connected app still
 # gets the server's 409 guidance (same as before this branch existed).
 MODE=""; CONN_REPO=""; CONN_BRANCH=""
-if substrait_call GET /api/deploy/app && [ "${SUBSTRAIT_STATUS:-}" = "200" ]; then
-  MODE="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field mode)" || MODE=""
-  CONN_REPO="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_repo)" || CONN_REPO=""
-  CONN_BRANCH="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_branch)" || CONN_BRANCH=""
+# The deploy environment (see substrait_env_target): lower-cased like the server does, and
+# re-exported so every later call in this script carries the same X-Substrait-Env.
+ENV_TARGET="$(substrait_env_target 2>/dev/null)" || ENV_TARGET=""
+if [ -n "$ENV_TARGET" ]; then SUBSTRAIT_ENV_TARGET="$ENV_TARGET"; export SUBSTRAIT_ENV_TARGET; fi
+if substrait_call GET /api/deploy/app; then
+  case "${SUBSTRAIT_STATUS:-}" in
+    200)
+      MODE="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field mode)" || MODE=""
+      CONN_REPO="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_repo)" || CONN_REPO=""
+      CONN_BRANCH="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_branch)" || CONN_BRANCH=""
+      if [ -n "$ENV_TARGET" ] && [ "$ENV_TARGET" != "production" ]; then
+        echo "Target environment: $ENV_TARGET"
+      fi ;;
+    404)
+      # The server validates the environment on every /api/deploy route; its 404 detail
+      # says which it was — an unknown environment, or an app that is gone/unbound.
+      detail="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail)" || detail=""
+      if [ -n "$ENV_TARGET" ] && printf '%s' "$detail" | grep -qi 'environment'; then
+        die "$detail — create it on the app's page in the portal (the environment switcher), or drop --env to deploy production."
+      fi ;;
+  esac
 fi
 
 # Honor the project's recorded mode choice (deploy_mode in .substrait/config.json,
@@ -345,6 +419,8 @@ fi
 # Keep the project's CLAUDE.md "Substrait deployment" block current (only if one
 # exists — its removal is a durable opt-out; /substrait:link is what adds it).
 substrait_write_memo refresh
+
+fi  # ── end package + deploy ──
 
 if [ "$WATCH" -ne 1 ]; then
   echo "Track it in the portal; once live it'll be at https://$host"

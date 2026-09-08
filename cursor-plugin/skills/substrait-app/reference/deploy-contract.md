@@ -53,6 +53,22 @@ rootless with no startup chown — keep `listen 8000`), or move the static conte
 `frontend/` slot, which grants nginx the capabilities it needs. The deploy is rejected up
 front with this fix if a backend Dockerfile is `FROM nginx`.
 
+### The frontend's nginx must not proxy to a compose hostname
+
+`/api` is routed to the backend by the ingress and never reaches the frontend container,
+so its nginx config needs no `proxy_pass` at all (the scaffold's `cicd/nginx.conf` is
+static-only). Adding a compose-style `location /api/ { proxy_pass http://backend:8000; }`
+for local development is fatal on the platform: nginx resolves every literal
+`proxy_pass`/`upstream server` hostname when it loads its config, `backend` does not exist
+in the app's namespace, and nginx refuses to start — the frontend crash-loops with
+`host not found in upstream "backend"` and the app 502s. The deploy is rejected at
+VALIDATING when a file the frontend Dockerfile copies under `/etc/nginx/` names a dot-less
+host that is not the app's own Service (`<deploy-slug>-backend[-direct]`,
+`<deploy-slug>-frontend[-direct]`), its database pod, or a declared backing service
+(`redis`/`kafka`/`qdrant`). FQDNs, IPs and `$variable` targets are not checked. For
+compose, use `npm run dev` (Vite proxies `/api`) or a separate compose-only nginx config
+that the Dockerfile never copies.
+
 ### Wheels-only by default (Python scaffold only)
 
 This is a convenience of the **Python/FastAPI scaffold**, not a contract rule — ignore it

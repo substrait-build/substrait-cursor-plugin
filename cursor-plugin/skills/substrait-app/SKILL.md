@@ -1,6 +1,6 @@
 ---
 name: substrait-app
-version: 2026.08.30.104958
+version: 2026.09.08.024724
 description: Build apps that deploy on the Substrait platform via upload mode (GitHub-connected apps deploy from their pushed branch with the same commands — no zip). Use whenever the user asks to build, scaffold, or package an app "for Substrait", "to upload to Substrait", or for the Substrait upload/deploy contract. The zip contains app code plus its Dockerfile(s): a backend that serves GET /health on port 8000 with its API under /api (any language or framework — the scaffold uses FastAPI) and a cicd/Dockerfile.backend, plus Flyway migrations, and an optional frontend served on port 80 (any framework — the scaffold uses React + Vite + Tailwind) with a cicd/Dockerfile.frontend. The platform generates only the Kubernetes manifests, so you never write k8s or deal with the app slug.
 ---
 
@@ -271,6 +271,11 @@ works (Vue, Svelte, Astro, plain static HTML, a server-rendered app, …). Whate
   hardcode an absolute API URL — the ingress routes `/api` to the backend on the same host.
 - **Serve the built output on port 80** (the scaffold serves the static bundle via nginx in
   `cicd/Dockerfile.frontend`).
+- **Never proxy `/api` from the frontend's nginx config.** `/api` is routed by the ingress
+  and never reaches nginx, and nginx refuses to start when a `proxy_pass`/`upstream`
+  hostname does not resolve — a compose-style `proxy_pass http://backend:8000` crash-loops
+  the frontend and fails the deploy. Keep the scaffold's `cicd/nginx.conf` proxy-free; for
+  local compose use `npm run dev` (Vite proxies `/api`) or a separate compose-only config.
 
 If you ship **no `frontend/`**, the platform routes *all* traffic (including `/`) to the
 backend, so a backend-only app must serve its own root/pages itself — a pure-API backend
@@ -414,15 +419,19 @@ failure, the request never reached the app — look at the caller, the path (is 
 `/api`?), or the frontend's network tab instead of inventing a backend cause. Reporting
 "the logs show nothing at that time" is a real and useful answer.
 
-Two failure shapes worth recognising on sight, because both deploy green:
+Two failure shapes worth recognising on sight:
 
-- **`host not found in upstream "backend"`** (nginx, frontend crash-looping) — the
-  frontend's nginx config is proxying to a docker-compose service name. On the platform
-  `/api` is routed by the ingress and never reaches nginx, so that `upstream` block must
-  not be there at all. See *Frontend* above.
-- **A `TypeError` comparing values that came out of the database** — anything serialised
-  through JSON comes back as a string, including datetimes. Revive it before comparing, and
-  keep timezone-awareness consistent on both sides.
+- **`host not found in upstream "backend"`** (nginx) — the frontend's nginx config is
+  proxying to a docker-compose service name. On the platform `/api` is routed by the
+  ingress and never reaches nginx, so that `proxy_pass`/`upstream` block must not be there
+  at all. A literal compose hostname is rejected at VALIDATING before anything builds; a
+  frontend that still cannot start for this reason fails the deploy with *frontend failed
+  to start* carrying this line. See *Frontend* above. Remove the block and redeploy — no
+  other change is needed.
+- **A `TypeError` comparing values that came out of the database** (deploys green, fails at
+  request time) — anything serialised through JSON comes back as a string, including
+  datetimes. Revive it before comparing, and keep timezone-awareness consistent on both
+  sides.
 
 Logs need an **account** credential, so `/substrait:logs` requires `/substrait:login`
 (a 401 here is not fixed by `/substrait:link`), and you can only read logs for an app you

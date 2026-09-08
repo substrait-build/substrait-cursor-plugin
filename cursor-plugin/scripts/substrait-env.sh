@@ -7,6 +7,10 @@
 #                                read from STDIN (use for secrets — keeps the value out
 #                                of the command line — and for multi-line values).
 #   unset NAME                   remove one var
+#   --env NAME (any command)     act on that ENVIRONMENT of the app (e.g. staging) instead
+#                                of production; also $SUBSTRAIT_ENV_TARGET / an "environment"
+#                                key in .substrait/config.json. Each environment has its
+#                                own vars.
 #
 # Every mutation live-applies: on a deployed app the platform reconciles the app's
 # Secret and rolls the backend within seconds ("applied": true in the response);
@@ -128,6 +132,21 @@ cmd_unset() {
   echo "Removed $name."
   _report_applied unset
 }
+
+# Global --env, anywhere on the line: consumed here so every subcommand targets the
+# same environment (substrait_common's substrait_call sends it as X-Substrait-Env).
+_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --env) shift; [ -n "${1:-}" ] || die "--env needs an environment name (e.g. staging)"; SUBSTRAIT_ENV_TARGET="$1"; export SUBSTRAIT_ENV_TARGET; shift ;;
+    --env=*) SUBSTRAIT_ENV_TARGET="${1#*=}"; export SUBSTRAIT_ENV_TARGET; shift ;;
+    *) _args+=("$1"); shift ;;
+  esac
+done
+set -- "${_args[@]+"${_args[@]}"}"
+if t="$(substrait_env_target 2>/dev/null)" && [ -n "$t" ] && [ "$t" != "production" ]; then
+  echo "Environment: $t" >&2
+fi
 
 case "${1:-list}" in
   list)  shift || true; cmd_list "$@" ;;

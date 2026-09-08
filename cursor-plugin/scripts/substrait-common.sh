@@ -125,6 +125,22 @@ substrait_account_token() {
 # it's display-only (the server infers the app from the token).
 substrait_app_slug() { _json_get "$SUBSTRAIT_CONFIG_FILE" slug; }
 
+# substrait_env_target — which DEPLOY ENVIRONMENT of the app a command means (Substrait
+# environments: production plus e.g. staging/dev). Resolution: the --env flag (the scripts
+# export it as $SUBSTRAIT_ENV_TARGET, which can also be set directly) -> an "environment"
+# key in the project config (.substrait/config.json; add it by hand to pin a folder to an
+# environment — the link script preserves it). Empty = production, exactly what every
+# pre-environments client meant. Lower-cased here, as the server does. Sent as
+# X-Substrait-Env on /api/deploy/*. NOT $SUBSTRAIT_ENV: that name is the app's injected
+# runtime variable (production|preview) and the platform's own prod|demo deploy switch.
+substrait_env_target() {
+  local v
+  if [ -n "${SUBSTRAIT_ENV_TARGET:-}" ]; then v="$SUBSTRAIT_ENV_TARGET"
+  else v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" environment)" || return 1
+  fi
+  printf '%s' "$v" | tr '[:upper:]' '[:lower:]'
+}
+
 # substrait_call METHOD PATH [extra curl args...]
 # Performs the request and sets two globals in the CURRENT shell:
 #   SUBSTRAIT_BODY    — the response body
@@ -158,6 +174,12 @@ substrait_call() {
       echo "This project isn't bound to an app yet — run /substrait:link to pick one." >&2
       return 2
     fi
+  fi
+  # The deploy environment this command targets (see substrait_env_target). Only the
+  # /api/deploy/* routes read it; elsewhere it is ignored.
+  local env_target
+  if env_target="$(substrait_env_target)" && [ -n "$env_target" ]; then
+    set -- -H "X-Substrait-Env: $env_target" "$@"
   fi
   # Identify the plugin build. Harmless on every endpoint; the portal reads it on deploy.
   local pv
