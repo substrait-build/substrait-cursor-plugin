@@ -1,6 +1,6 @@
 ---
 name: substrait-app
-version: 2026.09.08.024724
+version: 2026.09.11.040902
 description: Build apps that deploy on the Substrait platform via upload mode (GitHub-connected apps deploy from their pushed branch with the same commands — no zip). Use whenever the user asks to build, scaffold, or package an app "for Substrait", "to upload to Substrait", or for the Substrait upload/deploy contract. The zip contains app code plus its Dockerfile(s): a backend that serves GET /health on port 8000 with its API under /api (any language or framework — the scaffold uses FastAPI) and a cicd/Dockerfile.backend, plus Flyway migrations, and an optional frontend served on port 80 (any framework — the scaffold uses React + Vite + Tailwind) with a cicd/Dockerfile.frontend. The platform generates only the Kubernetes manifests, so you never write k8s or deal with the app slug.
 ---
 
@@ -173,9 +173,11 @@ lint that rejects those two shapes doesn't apply to it.
 
 ### Object storage (files)
 
-Declaring `object-storage: {}` gets the app a **private bucket of its own** and one injected
-variable, **`OBJECT_STORAGE_BUCKET`** (the bucket name). Use it for anything a database row
-shouldn't hold — uploads, generated PDFs, images, exports.
+Declaring `object-storage: {}` gets the app a **private bucket of its own, per environment**
+and one injected variable, **`OBJECT_STORAGE_BUCKET`** (the bucket name). Use it for anything
+a database row shouldn't hold — uploads, generated PDFs, images, exports. Read the variable
+rather than hard-coding a name: `staging` and `production` get different buckets, and a new
+environment's starts empty.
 
 ```python
 import storage                       # backend/storage.py, shipped in the scaffold

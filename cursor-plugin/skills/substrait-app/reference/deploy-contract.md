@@ -236,7 +236,7 @@ VITE_SENTRY_DSN=https://abc@o0.ingest.sentry.io/0
     kafka:                 # → KAFKA_BROKERS=kafka:9092 (single-node Redpanda, Kafka-compatible)
       persistent: true
     qdrant: {}             # → QDRANT_URL=http://qdrant:6333 (gRPC on qdrant:6334)
-    object-storage: {}     # → OBJECT_STORAGE_BUCKET=<private per-app GCS bucket>
+    object-storage: {}     # → OBJECT_STORAGE_BUCKET=<private GCS bucket, one per environment>
   ```
 
   The catalog is exactly those four; `persistent` (default `false`) is the only option and
