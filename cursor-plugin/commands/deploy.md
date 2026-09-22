@@ -164,14 +164,19 @@ bypassing the check.
 
 ## Deploy environments
 
-An app can have more than one **deploy environment** — `production` (the app's own
-instance) plus e.g. `staging` or `dev`, each with its own namespace, database, URL
-(`<slug>--<env>.<org>.apps.substrait.build`), variables and access settings. Environments
-are created on the app's page in the portal (the environment switcher under the header).
+An app has at most two **deploy environments**: `dev` and `production`, each with its own
+namespace, database, URL, variables and access settings. `production` is the app's own
+URL (`<slug>.<org>.apps.substrait.build`); `dev` is `<slug>--dev.<org>.apps.substrait.build`
+and always sits behind sign-in for the organisation — it can never be made public.
 
-- `--env <name>` deploys to that environment instead of production:
-  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" --env staging --watch`
-- The script refuses a name the app does not have; production needs no flag.
+- **New apps start in `dev`.** Their first deploys land there, and there is no
+  production until the app **goes live**. Apps created before that keep production as
+  their default and can add a `dev` from the environment switcher on the app's page.
+- A bare deploy targets the app's **default** environment (`dev` for an app that
+  started there, even after it goes live); the script prints `Target environment:` so
+  say which one it was. `--env <name>` picks one explicitly:
+  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" --env dev --watch`
+- The script refuses a name the app does not have.
 - The same folder deploys to any environment — nothing in the code changes. The app can
   read `SUBSTRAIT_ENV` (`production` | `preview`), `SUBSTRAIT_ENV_NAME` and `APP_URL`
   at runtime.
@@ -179,13 +184,24 @@ are created on the app's page in the portal (the environment switcher under the 
   file exists (applied on the first deploy, again only when the file changes, and again on
   the first deploy after a database reset).
   Production is never seeded.
-- **Promote** one environment's live build into another — the way staging reaches
-  production without a rebuild:
-  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promote --to production --from staging --watch`
-  `--from` defaults to the `--env` / pinned environment (else production). The target's
-  database is migrated from that build's tree first, then its images are copied into
-  the target's own repositories and rolled out. The target must have been deployed at
-  least once. A protected target (production by default) accepts this from the app
-  owner or an admin only — a collaborator gets a 403 with that explanation.
-- To pin a folder to an environment for every command, add `"environment": "staging"` to
-  `.substrait/config.json`; `$SUBSTRAIT_ENV_TARGET` works too. `--env` always wins.
+- **Promote to production — gated.** For an app with a `dev` environment, production
+  changes only by promotion, and a promotion into production does NOT deploy right away:
+  it starts the production **security check** (Layer 1 scans → Layer 2 classification →
+  Layer 3 review → Layer 4) on the build that is live in `dev` at that moment. When the
+  check reaches Layer 4, that exact build is promoted into production automatically (its
+  database migrated from the build's tree, its images copied and rolled out, no rebuild).
+  If the check does not clear — scans fail, a reviewer rejects — nothing is deployed and
+  the promotion is blocked; fix the issue, deploy to `dev` again and promote again (a new
+  check starts from Layer 1).
+  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promote --to production`
+  `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promotion` shows where it is (the
+  check's layer, or why it was blocked). A review can take a while — tell the user, and
+  do not poll in a loop. Only the app owner or an admin can promote to production (their
+  deploy token or a personal token); a collaborator gets a 403.
+- **Going live** is the same gated promotion on an app with no production yet:
+  production is created when the check clears, with an EMPTY database — nothing is copied
+  from `dev`. Confirm with the user before requesting it.
+- A deploy aimed straight at production (`--env production`) is refused for an app that
+  has a `dev` environment; deploy to `dev` and promote instead.
+- To pin a folder to an environment for every command, add `"environment": "production"`
+  to `.substrait/config.json`; `$SUBSTRAIT_ENV_TARGET` works too. `--env` always wins.

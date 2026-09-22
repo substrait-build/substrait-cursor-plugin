@@ -48,8 +48,10 @@ from there.
 ## Deploy environments
 
 Each deploy environment of an app has its **own** variables and secrets. Every command
-takes `--env <name>` (e.g. `… substrait-env.sh --env staging list`); without it, production.
-`$SUBSTRAIT_ENV_TARGET` or an `"environment"` key in `.substrait/config.json` pins a default.
-Creating an environment in the portal copies production's non-secret variables; secrets
-are never copied, so set them per environment. A **protected** environment (production by
+takes `--env <name>` (e.g. `… substrait-env.sh --env production list`); without it, the
+app's default environment — `dev` for an app created in dev, production for an older app.
+`$SUBSTRAIT_ENV_TARGET` or an `"environment"` key in `.substrait/config.json` pins one.
+A new environment starts from its sibling's non-secret variables (adding `dev` copies
+production's; going live copies none); secrets are never copied, so set them per
+environment. A **protected** environment (production by
 default) accepts variable edits only from the app owner or an admin.

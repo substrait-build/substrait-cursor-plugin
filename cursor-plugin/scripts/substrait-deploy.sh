@@ -4,8 +4,9 @@
 # the server pulls the pushed branch, so the tree must be committed + pushed (gated
 # locally, verified server-side by SHA) — while every other app is packaged (source
 # only) and uploaded as a zip.
-#   --env <name>     deploy to that ENVIRONMENT of the app (e.g. staging) instead of
-#                    production. The environment must already exist (the portal's
+#   --env <name>     deploy to that ENVIRONMENT of the app (e.g. production) instead of
+#                    the app's default one (dev for an app created in dev, else
+#                    production). The environment must already exist (the portal's
 #                    environment switcher creates one). Also honoured: $SUBSTRAIT_ENV_TARGET
 #                    and an "environment" key in .substrait/config.json.
 #   --watch          poll the deploy until it finishes and print the preview URL
@@ -14,10 +15,16 @@
 #                    dotnet). Ignored for connected apps (the platform detects it).
 #   promote --to <env> [--from <env>]
 #                    promote one environment's LIVE build into another (default --from:
-#                    the --env / pinned environment, else production): the target's
+#                    the --env / pinned environment, else the app's default): the target's
 #                    database is migrated from that build's tree, its images copied and
 #                    rolled out — no rebuild. A protected target (production) accepts
-#                    this from the app owner or an admin only. With --watch follows it.
+#                    this from the app owner or an admin only. `--to production` is
+#                    GATED: it starts the production security check (Layers 1–4) on the
+#                    source's live build, and the promotion (going live, when the app has
+#                    no production yet) executes automatically once that check reaches
+#                    Layer 4. With --watch follows a non-production promote.
+#   promotion        where the app's promotion to production is (the check's layer, or
+#                    why it was blocked)
 #   endpoints        submit .substrait/endpoints.json only, no deploy — legacy
 #                    inventory-only fallback (prefer a repo-root openapi.json,
 #                    which ships in the zip and is picked up server-side)
@@ -42,18 +49,19 @@ WATCH=0
 STACK=""
 ENDPOINTS_ONLY=0
 CHECK_ONLY=0
-PROMOTE=0; PROMOTE_TO=""; PROMOTE_FROM=""
+PROMOTE=0; PROMOTE_TO=""; PROMOTE_FROM=""; PROMOTION_STATUS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     promote) PROMOTE=1; shift ;;
+    promotion) PROMOTION_STATUS=1; shift ;;
     --to) shift; PROMOTE_TO="${1:-}"; [ -n "$PROMOTE_TO" ] || die "--to needs an environment name (e.g. production)"; shift ;;
     --to=*) PROMOTE_TO="${1#*=}"; shift ;;
-    --from) shift; PROMOTE_FROM="${1:-}"; [ -n "$PROMOTE_FROM" ] || die "--from needs an environment name (e.g. staging)"; shift ;;
+    --from) shift; PROMOTE_FROM="${1:-}"; [ -n "$PROMOTE_FROM" ] || die "--from needs an environment name (e.g. dev)"; shift ;;
     --from=*) PROMOTE_FROM="${1#*=}"; shift ;;
     endpoints) ENDPOINTS_ONLY=1; shift ;;
     check) CHECK_ONLY=1; shift ;;
     --watch) WATCH=1; shift ;;
-    --env) shift; SUBSTRAIT_ENV_TARGET="${1:-}"; [ -n "$SUBSTRAIT_ENV_TARGET" ] || die "--env needs an environment name (e.g. staging)"; export SUBSTRAIT_ENV_TARGET; shift ;;
+    --env) shift; SUBSTRAIT_ENV_TARGET="${1:-}"; [ -n "$SUBSTRAIT_ENV_TARGET" ] || die "--env needs an environment name (e.g. dev or production)"; export SUBSTRAIT_ENV_TARGET; shift ;;
     --env=*) SUBSTRAIT_ENV_TARGET="${1#*=}"; export SUBSTRAIT_ENV_TARGET; shift ;;
     --stack) shift; STACK="${1:-}"; [ -n "$STACK" ] || die "--stack needs a value (e.g. node, go, fastapi)"; shift ;;
     --stack=*) STACK="${1#*=}"; shift ;;
@@ -182,6 +190,33 @@ stamp_scaffold_version() {
   STAMP_CHANGED=1
   echo "Stamped scaffold_version $ver into substrait.yaml."
 }
+# `promotion`: where the app's promotion into production is — the security check's layer,
+# or why it stopped. Read-only.
+if [ "$PROMOTION_STATUS" -eq 1 ]; then
+  substrait_call GET /api/deploy/promotion || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not read the promotion (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
+  if printf '%s' "$SUBSTRAIT_BODY" | grep -q '"promotion"[[:space:]]*:[[:space:]]*null'; then
+    echo "This app has no promotion to production. Start one with: substrait-deploy.sh promote --to production"
+    exit 0
+  fi
+  status="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field status)" || status=""
+  detail="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail)" || detail=""
+  reason="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field reason)" || reason=""
+  gov="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field governance_run_id)" || gov=""
+  run="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field promote_run_id)" || run=""
+  case "$status" in
+    CHECKING)  echo "Waiting on the production security check (run $gov): ${detail:-in progress}." ;;
+    READY)     echo "Security check cleared — the promotion is starting." ;;
+    PROMOTING) echo "Security check cleared — promoting to production now (deploy run $run)." ;;
+    PROMOTED)  echo "Promoted to production (deploy run $run)." ;;
+    BLOCKED)   echo "Blocked by the security check (run $gov): ${reason:-see the portal}. Fix it, deploy to dev, then promote again." ;;
+    FAILED)    echo "The promotion failed: ${reason:-see the portal}." ;;
+    CANCELLED) echo "The last promotion was cancelled." ;;
+    *)         echo "$SUBSTRAIT_BODY" ;;
+  esac
+  exit 0
+fi
+
 # --to/--from only mean something with the promote verb; without it the script would
 # otherwise fall through to packaging the working tree and uploading it — the opposite of
 # a promotion.
@@ -190,12 +225,20 @@ if [ "$PROMOTE" -ne 1 ] && [ -n "$PROMOTE_TO$PROMOTE_FROM" ]; then
 fi
 if [ "$PROMOTE" -eq 1 ]; then
   [ -n "$PROMOTE_TO" ] || die "usage: promote --to <environment> [--from <environment>] [--watch]"
-  src="${PROMOTE_FROM:-$(substrait_env_target 2>/dev/null)}"; src="${src:-production}"
+  # No --from and no --env: send no `from`, and the server promotes from the app's DEFAULT
+  # environment — the one a bare deploy lands on.
+  src="${PROMOTE_FROM:-$(substrait_env_target 2>/dev/null)}"
   src="$(printf '%s' "$src" | tr '[:upper:]' '[:lower:]')"
   to="$(printf '%s' "$PROMOTE_TO" | tr '[:upper:]' '[:lower:]')"
-  echo "Promoting $src → $to (the live build of $src, no rebuild)…"
+  if [ -n "$src" ]; then
+    echo "Promoting $src → $to (the live build of $src, no rebuild)…"
+    payload="{\"from\":\"$src\",\"to\":\"$to\"}"
+  else
+    echo "Promoting the app's default environment → $to (its live build, no rebuild)…"
+    payload="{\"to\":\"$to\"}"
+  fi
   substrait_call POST /api/deploy/promote -H "Content-Type: application/json" \
-    --data "{\"from\":\"$src\",\"to\":\"$to\"}" || exit $?
+    --data "$payload" || exit $?
   case "${SUBSTRAIT_STATUS:-}" in
     200|201|202) : ;;
     403) die "not allowed: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
@@ -203,6 +246,19 @@ if [ "$PROMOTE" -eq 1 ]; then
     *) die "promotion failed (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY" ;;
   esac
   RUN_ID="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field run_id)" || RUN_ID=""
+  src="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field from)" || true
+  if printf '%s' "$SUBSTRAIT_BODY" | grep -q '"gated"[[:space:]]*:[[:space:]]*true'; then
+    # Into production nothing deploys yet: the production security check runs on this
+    # exact build (Layers 1–4) and the promotion executes once it reaches Layer 4. That can
+    # take a human review, so there is nothing to --watch here.
+    gov="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field governance_run_id)" || gov=""
+    what="Promotion to production"
+    printf '%s' "$SUBSTRAIT_BODY" | grep -q '"went_live"[[:space:]]*:[[:space:]]*true' && what="Going live"
+    echo "$what requested: the production security check (run ${gov:-?}) is now reviewing ${src:-the default environment}'s live build."
+    echo "Nothing is deployed until it clears review — then that exact build ships to production automatically."
+    echo "Check progress with: substrait-deploy.sh promotion   (or the app's Security tab in the portal)."
+    exit 0
+  fi
   echo "Promotion queued (run $RUN_ID)."
   if [ "$WATCH" -ne 1 ] || [ -z "$RUN_ID" ]; then
     echo "Track it in the portal (the $to environment's deploy history)."
@@ -254,15 +310,17 @@ if substrait_call GET /api/deploy/app; then
       MODE="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field mode)" || MODE=""
       CONN_REPO="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_repo)" || CONN_REPO=""
       CONN_BRANCH="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field connected_branch)" || CONN_BRANCH=""
-      if [ -n "$ENV_TARGET" ] && [ "$ENV_TARGET" != "production" ]; then
-        echo "Target environment: $ENV_TARGET"
-      fi ;;
+      # Always say where this lands: with no --env the server picked the app's default,
+      # which for an app created in dev is NOT production.
+      target_name="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field environment_name)" || target_name=""
+      target_name="${target_name:-$ENV_TARGET}"
+      [ -n "$target_name" ] && echo "Target environment: $target_name" ;;
     404)
       # The server validates the environment on every /api/deploy route; its 404 detail
       # says which it was — an unknown environment, or an app that is gone/unbound.
       detail="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail)" || detail=""
       if [ -n "$ENV_TARGET" ] && printf '%s' "$detail" | grep -qi 'environment'; then
-        die "$detail — create it on the app's page in the portal (the environment switcher), or drop --env to deploy production."
+        die "$detail — create it on the app's page in the portal (the environment switcher), or drop --env to deploy to the app's default environment."
       fi ;;
   esac
 fi
@@ -384,6 +442,8 @@ substrait_call POST /api/deploy \
   -F "backend_stack=$STACK" || exit $?
 case "${SUBSTRAIT_STATUS:-}" in
   200|201|202) : ;;
+  # e.g. production of an app with a dev environment: it changes only by a gated promotion.
+  409) die "deploy refused: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
   *) die "deploy failed (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY" ;;
 esac
 

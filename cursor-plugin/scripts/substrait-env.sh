@@ -7,8 +7,8 @@
 #                                read from STDIN (use for secrets — keeps the value out
 #                                of the command line — and for multi-line values).
 #   unset NAME                   remove one var
-#   --env NAME (any command)     act on that ENVIRONMENT of the app (e.g. staging) instead
-#                                of production; also $SUBSTRAIT_ENV_TARGET / an "environment"
+#   --env NAME (any command)     act on that ENVIRONMENT of the app (e.g. production) instead
+#                                of the app's default one; also $SUBSTRAIT_ENV_TARGET / an "environment"
 #                                key in .substrait/config.json. Each environment has its
 #                                own vars.
 #
@@ -138,7 +138,7 @@ cmd_unset() {
 _args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env) shift; [ -n "${1:-}" ] || die "--env needs an environment name (e.g. staging)"; SUBSTRAIT_ENV_TARGET="$1"; export SUBSTRAIT_ENV_TARGET; shift ;;
+    --env) shift; [ -n "${1:-}" ] || die "--env needs an environment name (e.g. dev or production)"; SUBSTRAIT_ENV_TARGET="$1"; export SUBSTRAIT_ENV_TARGET; shift ;;
     --env=*) SUBSTRAIT_ENV_TARGET="${1#*=}"; export SUBSTRAIT_ENV_TARGET; shift ;;
     *) _args+=("$1"); shift ;;
   esac

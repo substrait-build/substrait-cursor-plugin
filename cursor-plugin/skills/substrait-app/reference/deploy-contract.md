@@ -69,6 +69,90 @@ host that is not the app's own Service (`<deploy-slug>-backend[-direct]`,
 compose, use `npm run dev` (Vite proxies `/api`) or a separate compose-only nginx config
 that the Dockerfile never copies.
 
+### Base images and the container scan (what it grades)
+
+Every image the platform builds for you is scanned for CVEs in its **OS packages** (the
+language packages — pip, npm, Go modules — are a separate scan). The outcome gates
+**promotion to production**: a scan carrying a blocking finding fails the security check
+that go-live waits on, and the promotion is refused until you fix and redeploy.
+
+What counts as blocking is the useful part:
+
+| Finding | Treated as |
+|---|---|
+| CVE the distro has **published a fixed package version** for | **Blocking** (Critical/High) |
+| CVE with **no fix available** from the distro | Advisory — never blocks, whatever its CVSS |
+
+That asymmetry is deliberate: you cannot be held to a patch that does not exist. It also
+means the target is not a CVE-free base image — no general-purpose base is CVE-free — but
+an image that is **current with its own distro**. A stock `python:3.12-slim` carries ~150
+OS CVEs and **zero** of them block, because Debian has fixed none of them yet. A stock
+`nginx:1.29-alpine` carries ~167, of which **37 block**, because Alpine fixed them and
+that tag has not been rebuilt since.
+
+Two lines get you there, and they do different jobs.
+
+**1. Float the base tag onto the vendor's current release.** A pinned minor is frozen on
+whatever distro branch it was cut against and is never rebuilt forward, so its fixable-CVE
+count only grows. Measured 2026-09-22:
+
+| base | distro | blocking | total |
+|---|---|---|---|
+| `nginx:1.27-alpine` | Alpine 3.21 | 39 | 137 |
+| `nginx:1.29-alpine` | Alpine 3.23 | 37 | 167 |
+| **`nginx:stable-alpine`** | **Alpine 3.24** | **0** | **0** |
+
+Same image, same day — the difference is that `stable-alpine` tracks nginx's stable branch
+on the newest Alpine and gets rebuilt when either moves. Pin an exact minor only when you
+need a specific runtime version, and then expect to bump it yourself.
+
+**2. Apply the distro's outstanding updates in the final stage**, so you are covered in
+the window between a distro security update and the vendor's next rebuild of that tag:
+
+```dockerfile
+FROM nginx:stable-alpine
+RUN apk upgrade --no-cache                    # Alpine
+```
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/*               # Debian/Ubuntu
+```
+
+Both scaffold Dockerfiles ship exactly this. Details worth knowing:
+
+- **Neither line replaces the other.** The floating tag is what keeps the base current;
+  the upgrade is what covers the lag before the tag is rebuilt. On a freshly rebuilt base
+  the upgrade is a no-op — that is the point, not a reason to drop it.
+- **Only the final stage is scanned.** Build stages (the `node:…-slim` that runs `npm run
+  build`, a `golang:` compile stage) are discarded before push and contribute nothing to
+  the scan — do not spend image size upgrading them.
+- **Keep the upgrade directly under the `FROM`.** Its cache key is the base image digest,
+  so it re-runs precisely when the base moves and is reused otherwise; a rebuild after an
+  upstream base refresh picks up the new packages without a manual bump.
+- **Cost.** The upgrade adds only the packages it actually replaces: ~0 MB on a current
+  `nginx:stable-alpine` or `python:3.12-slim` today, growing only in proportion to how far
+  the published base has drifted — which is exactly when you want it.
+- **`scratch` and distroless runtimes have no packages to upgrade** and scan clean by
+  construction (the Go example under *Other backend stacks* uses
+  `gcr.io/distroless/static-debian12`). If your stack compiles to a static binary, that is
+  the cheapest clean answer.
+- **Static-server backends.** The capless-backend recommendation above,
+  `nginxinc/nginx-unprivileged`, publishes the same floating tag. It drops to non-root, so
+  the upgrade needs to bracket itself:
+
+  ```dockerfile
+  FROM nginxinc/nginx-unprivileged:stable-alpine
+  USER root
+  RUN apk upgrade --no-cache
+  USER nginx
+  ```
+
+Advisory (no-fix) findings still show up on the app's security tab. They are worth reading
+— and a distro that leaves many of them unfixed is worth switching away from — but they
+will not stop a deploy or a promotion.
+
 ### Wheels-only by default (Python scaffold only)
 
 This is a convenience of the **Python/FastAPI scaffold**, not a contract rule — ignore it
@@ -271,6 +355,35 @@ VITE_SENTRY_DSN=https://abc@o0.ingest.sentry.io/0
   (public, non-secret values only — it's baked into the JS bundle). Leave `VITE_API_URL`
   unset (the frontend Dockerfile forces `""`). See *Build-time frontend env vars* above.
 
+### Environments and seed data
+
+An app runs as one or two **environments** — `dev` (where a new app starts, at
+`<slug>--dev.<org>.apps.substrait.build`, always behind organisation sign-in) and
+`production` (`<slug>.<org>.apps.substrait.build`, created when the owner goes live).
+Each is a full, separate instance: its own namespace, database, object-storage bucket,
+variables and secrets. Nothing in the zip is per environment; the app learns where it is
+at runtime from three reserved variables:
+
+- `SUBSTRAIT_ENV` — `production` | `preview` (any non-production environment)
+- `SUBSTRAIT_ENV_NAME` — the environment's exact name
+- `APP_URL` — the environment's own base URL (`https://…`, no trailing slash)
+
+Build absolute URLs (OAuth redirect URIs, links in emails, webhooks you register
+elsewhere) from `APP_URL`, never from a hard-coded hostname. The frontend needs nothing:
+it calls same-origin `/api`, so one build works in every environment. That same rule is
+what lets a promotion move `dev`'s exact images into production **without a rebuild**,
+so nothing environment-specific may be baked in at build time.
+
+**`backend/db/seed.sql`** (optional) seeds a **non-production** database with starter
+rows. It is applied after the Flyway migrations, as a repeatable migration tracked in its
+own history table (`flyway_seed_history`): on the environment's first deploy, again
+whenever the file's contents change, and again after a database reset. **Production is
+never seeded**, and going live starts production with an empty database, so the app must
+work with no rows. Write the seed to be re-runnable (`INSERT IGNORE` / `ON DUPLICATE KEY
+UPDATE` on OceanBase and MySQL, `ON CONFLICT DO NOTHING` on Postgres), and keep schema
+changes in `V__` migrations, never in the seed. Never put real or production data in it:
+the file is committed and ships in the zip.
+
 ### User identity under Google SSO (optional)
 
 If the app owner enables **Google single sign-on** (the portal's Access tab), every
@@ -444,6 +557,10 @@ EXPOSE 8000
 CMD ["/server"]
 ```
 
+That runtime is distroless — no shell, no package manager, nothing for the container scan
+to find — so it needs no `apt-get upgrade` layer. A compiled backend on a full distro base
+does; see *Base images and the container scan*.
+
 Serve `GET /health` (200, the readiness probe) and your API under `/api/...` on port 8000,
 exactly as the FastAPI scaffold does. Everything else in this contract — one ingress host,
 `/api` routing, `backend/.env.example` for custom config, source-only zip — is unchanged.
@@ -452,6 +569,7 @@ exactly as the FastAPI scaffold does. Everything else in this contract — one i
 
 - [ ] `cicd/Dockerfile.backend` (or another backend Dockerfile) is present — `EXPOSE 8000`, serves `GET /health`, API under `/api`.
 - [ ] If `frontend/` is present, `cicd/Dockerfile.frontend` (+ `cicd/nginx.conf`) is shipped too — serves the SPA on port 80.
+- [ ] Every Dockerfile's **final** stage sits on a current base tag (`nginx:stable-alpine`, not a frozen minor) and applies the distro's security updates (`apk upgrade --no-cache` / `apt-get update && apt-get upgrade -y`) — or uses a distroless/`scratch` runtime, which needs neither. See *Base images and the container scan*.
 - [ ] (Python scaffold only) backend deps install wheels-only (`--only-binary=:all:`), or you've added the toolchain for any source-built dep.
 - [ ] Backend API routes are under `/api` (so the ingress routes them to the backend).
 - [ ] Frontend (if any) calls the API via relative `/api` paths, not an absolute URL.

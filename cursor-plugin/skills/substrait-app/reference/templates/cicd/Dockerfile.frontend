@@ -1,5 +1,8 @@
 # Frontend image for Substrait: build the Vite app, then serve the static bundle with
 # nginx on port 80. Built from the REPO ROOT, so COPY paths are repo-relative.
+#
+# Only the FINAL stage ships, so only its OS packages are scanned for vulnerabilities —
+# the node build stage below is discarded and never reaches the registry or the scan.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY frontend/package*.json ./
@@ -10,7 +13,22 @@ COPY frontend/ .
 ENV VITE_API_URL=""
 RUN npm run build
 
-FROM nginx:1.27-alpine
+# `stable-alpine` is a FLOATING tag: it tracks nginx's stable branch on the newest Alpine
+# release, and Docker Hub rebuilds it whenever either moves. That matters more than it
+# looks — a pinned minor like `nginx:1.29-alpine` is frozen on the Alpine branch it was cut
+# against (3.23), which keeps accumulating fixable CVEs it will never be rebuilt to clear:
+# 37 blocking findings today, against 0 for `stable-alpine` on Alpine 3.24. Pin a minor
+# only if you need a specific nginx version.
+FROM nginx:stable-alpine
+# Apply Alpine's outstanding security updates on every build. The platform scans this
+# image's OS packages with Trivy: a finding that HAS a fixed version blocks promotion to
+# production, one with no fix available is only advisory. The floating tag above gets you a
+# freshly rebuilt base; this line covers the window between an Alpine security update and
+# Docker Hub's next rebuild of that tag, when the published image is the one lagging. On a
+# current base it upgrades nothing and costs ~0 MB — it is the freshness guarantee, not a
+# one-time cleanup. Keep it directly under the FROM: its cache key is the base image
+# digest, so it re-runs exactly when the base moves.
+RUN apk upgrade --no-cache
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY cicd/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

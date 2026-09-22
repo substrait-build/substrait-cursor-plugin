@@ -126,11 +126,12 @@ substrait_account_token() {
 substrait_app_slug() { _json_get "$SUBSTRAIT_CONFIG_FILE" slug; }
 
 # substrait_env_target — which DEPLOY ENVIRONMENT of the app a command means (Substrait
-# environments: production plus e.g. staging/dev). Resolution: the --env flag (the scripts
+# environments: production and/or dev). Resolution: the --env flag (the scripts
 # export it as $SUBSTRAIT_ENV_TARGET, which can also be set directly) -> an "environment"
 # key in the project config (.substrait/config.json; add it by hand to pin a folder to an
-# environment — the link script preserves it). Empty = production, exactly what every
-# pre-environments client meant. Lower-cased here, as the server does. Sent as
+# environment — the link script preserves it). Empty = no header, so the server picks the
+# app's DEFAULT environment: `dev` for an app created in dev, production for an app
+# created before apps started there. Lower-cased here, as the server does. Sent as
 # X-Substrait-Env on /api/deploy/*. NOT $SUBSTRAIT_ENV: that name is the app's injected
 # runtime variable (production|preview) and the platform's own prod|demo deploy switch.
 substrait_env_target() {

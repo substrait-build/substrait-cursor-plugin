@@ -1,6 +1,6 @@
 ---
 name: substrait-app
-version: 2026.09.11.040902
+version: 2026.09.22.075110
 description: Build apps that deploy on the Substrait platform via upload mode (GitHub-connected apps deploy from their pushed branch with the same commands — no zip). Use whenever the user asks to build, scaffold, or package an app "for Substrait", "to upload to Substrait", or for the Substrait upload/deploy contract. The zip contains app code plus its Dockerfile(s): a backend that serves GET /health on port 8000 with its API under /api (any language or framework — the scaffold uses FastAPI) and a cicd/Dockerfile.backend, plus Flyway migrations, and an optional frontend served on port 80 (any framework — the scaffold uses React + Vite + Tailwind) with a cicd/Dockerfile.frontend. The platform generates only the Kubernetes manifests, so you never write k8s or deal with the app slug.
 ---
 
@@ -91,6 +91,27 @@ environment, never commit them:
 Whatever the stack, the database is whichever engine the manifest declares — use its
 driver (a **MySQL** driver for `oceanbase`), and keep all schema in Flyway migrations
 (below); your code only reads and writes rows.
+
+## Deploy environments: `dev` and `production`
+
+An app has up to two instances, each with its own namespace, database, bucket, variables
+and URL. **A new app starts in `dev`** — `https://<slug>--dev.<org>.apps.substrait.build`,
+always behind sign-in for the organisation — and has no production until its owner
+**goes live** (the portal's Go live, or `/substrait:deploy promote --to production`). A
+bare `/substrait:deploy` goes to the app's default environment, which stays `dev` after
+going live; production is reached with `--env production` or by promoting. Older apps
+default to production. The same code runs in both, so never hard-code which one it is:
+
+- **`SUBSTRAIT_ENV`** — `production` or `preview` (every non-production environment).
+- **`SUBSTRAIT_ENV_NAME`** — the exact name (`dev`, `production`).
+- **`APP_URL`** — this environment's own `https://…` URL, for absolute links, OAuth
+  redirect URIs and emails. Never build one from a hard-coded hostname.
+
+All three are reserved: the platform sets them and `.env.example` cannot override them.
+Environments never share data: going live gives production an **empty** database and
+bucket. To give a non-production database starter rows, ship an optional
+**`backend/db/seed.sql`** (see `reference/deploy-contract.md` → *Environments and seed
+data*).
 
 ## App manifest (`substrait.yaml`): description & backing services
 
@@ -300,6 +321,48 @@ build-time frontend vars (e.g. an OAuth client ID), commit a **`frontend/.env.pr
 
 See `reference/deploy-contract.md` → *Build-time frontend env vars* for the full rationale.
 
+## Container images and the security scan
+
+The platform scans the **OS packages of the images you ship** (the backend, plus the
+frontend when you ship one) for known CVEs, and the result gates **promotion to
+production**. The rule that decides whether a CVE costs you anything: a finding the distro
+has **published a fix for** is *blocking* — it fails the check that go-live waits on —
+while a finding with **no fix available** is recorded as advisory and never blocks. You are
+not graded on "does this base image have CVEs" (every general-purpose base has dozens);
+you are graded on **"is this image running the patches its distro has already shipped"**.
+
+Two habits carry the whole thing, in the **final stage** of every Dockerfile you write:
+
+**1. Put the runtime on a base tag the vendor still rebuilds.** A pinned minor freezes you
+on the distro branch it was cut against and is never rebuilt forward, so its fixable-CVE
+count only climbs. Measured on the same day: `nginx:1.27-alpine` (Alpine 3.21) = 39
+blocking, `nginx:1.29-alpine` (Alpine 3.23) = 37 blocking, **`nginx:stable-alpine`**
+(Alpine 3.24) = **0**. Prefer the floating tag — `nginx:stable-alpine`,
+`python:3.12-slim`, `node:22-bookworm-slim` — and pin an exact minor only when you need a
+specific runtime version.
+
+**2. Apply the distro's security updates**, which covers the window between a distro
+advisory and the vendor's next rebuild of that tag:
+
+```dockerfile
+RUN apk upgrade --no-cache                                              # Alpine
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* # Debian / Ubuntu
+```
+
+The scaffold's `cicd/Dockerfile.backend` and `cicd/Dockerfile.frontend` already do both,
+which is why they scan clean. Three more things to know when you write your own:
+
+- **Only the final stage ships.** A multi-stage build's compile stages are thrown away and
+  never scanned — upgrade the runtime stage, not the builder.
+- **Put the upgrade directly under the `FROM`.** Its build-cache key is the base image
+  digest, so it re-runs exactly when the base moves and stays cached otherwise.
+- **A `scratch` or distroless runtime has nothing to upgrade** and scans clean by
+  construction — a good default for compiled backends (Go, Rust). See *Other backend
+  stacks* in `reference/deploy-contract.md`.
+
+Your **language** dependencies (pip, npm, Go modules) are a separate scan with its own
+findings — keep them on current releases too, but that is not what this section covers.
+
 ## If you use the Python/FastAPI scaffold
 
 These are conveniences of the **default scaffold**, not contract requirements — they don't
@@ -345,7 +408,9 @@ and point `DATABASE_URL` at it. See `reference/local-dev.md` for the full guide.
 
 1. Pick a stack (or start from `reference/templates/` for the FastAPI + React default).
 2. Write the backend so it listens on **port 8000**, serves **`GET /health`**, and serves its
-   API under **`/api`**. Ship a `cicd/Dockerfile.backend` that builds it and `EXPOSE`s 8000.
+   API under **`/api`**. Ship a `cicd/Dockerfile.backend` that builds it and `EXPOSE`s 8000. Patch
+   its final stage (`apt-get upgrade` / `apk upgrade`) — see *Container images and the
+   security scan*.
 3. (Optional) Build a frontend in `frontend/` calling the API via relative `/api` paths, and
    ship a `cicd/Dockerfile.frontend` that serves it on **port 80**.
 4. Using a database? Declare it in `substrait.yaml` (`database: oceanbase` unless the
