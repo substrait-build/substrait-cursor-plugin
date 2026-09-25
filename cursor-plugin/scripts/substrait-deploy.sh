@@ -17,8 +17,8 @@
 #                    promote one environment's LIVE build into another (default --from:
 #                    the --env / pinned environment, else the app's default): the target's
 #                    database is migrated from that build's tree, its images copied and
-#                    rolled out — no rebuild. A protected target (production) accepts
-#                    this from the app owner or an admin only. `--to production` is
+#                    rolled out — no rebuild. A promotion is a deploy, so a collaborator's
+#                    token promotes into a protected target too. `--to production` is
 #                    GATED: it starts the production security check (Layers 1–4) on the
 #                    source's live build, and the promotion (going live, when the app has
 #                    no production yet) executes automatically once that check reaches

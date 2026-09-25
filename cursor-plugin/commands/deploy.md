@@ -196,8 +196,9 @@ and always sits behind sign-in for the organisation — it can never be made pub
   `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promote --to production`
   `bash "${CURSOR_PLUGIN_ROOT}/scripts/substrait-deploy.sh" promotion` shows where it is (the
   check's layer, or why it was blocked). A review can take a while — tell the user, and
-  do not poll in a loop. Only the app owner or an admin can promote to production (their
-  deploy token or a personal token); a collaborator gets a 403.
+  do not poll in a loop. Anyone with write access to the app — owner, collaborator or
+  admin — can promote to production with their deploy token or personal token; the
+  security check, not the caller's role, is the gate.
 - **Going live** is the same gated promotion on an app with no production yet:
   production is created when the check clears, with an EMPTY database — nothing is copied
   from `dev`. Confirm with the user before requesting it.
