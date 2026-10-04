@@ -486,15 +486,28 @@ stuck until you clear it — but you can do that yourself:
 1. **Portal → your app → Database tab.** A banner names the failed migration and lists any
    tables it had already created before it died. Click **Repair migration history**
    (owner or admin). That runs `flyway repair`, which clears the failed row.
-2. **Fix the migration file in place.** It never succeeded anywhere, so editing it is
-   safe — no new version number, no checksum problem.
-3. **Deal with what it left behind.** DDL auto-commits, so any table/column the migration
-   created before failing is still there, and the corrected migration re-runs *from the
-   start* — it will hit `table already exists` unless you either drop those objects or
-   make the migration re-runnable (`CREATE TABLE IF NOT EXISTS`, and check before
-   `ALTER`). The banner lists them with row counts so you know what's safe to drop.
+2. **Undo what it left behind — in this database, not in the file.** DDL auto-commits, so
+   every statement that ran before the failure is still applied: tables it created,
+   columns it added, columns it *dropped*. The corrected migration re-runs *from the
+   start*, so it will hit `table already exists` / `Duplicate column` on those. Drop what
+   it created and restore what it dropped, until the schema is back to the state before
+   the migration began. The banner lists leftover tables with row counts so you know
+   what's safe to drop; it does not list added or dropped columns — check those against
+   the file yourself.
+3. **Fix only the statement that failed.** Keep every other statement in the file,
+   including the ones that already ran here. Editing the file is safe only because the
+   migration has not succeeded in *any* environment yet — once it has, its checksum is
+   recorded there and any edit breaks that environment's next deploy (`Migration checksum
+   mismatch`).
 4. **Then deploy.** Repair before you push the fix: pushing an unfixed migration just
    half-applies it again and re-blocks deploys.
+
+**Never trim a migration to fit one database.** Deleting the statements that "already
+ran" (say, an `ADD COLUMN` the failed attempt left behind) makes the file succeed in that
+one database, but it no longer builds the schema from scratch. Every app starts in a
+`dev` environment, and every new environment begins with an empty database that runs the
+migrations from V1. That trimmed version fails there, and it can't be edited back
+afterwards without breaking the environment it succeeded in.
 
 ## Other backend stacks
 
