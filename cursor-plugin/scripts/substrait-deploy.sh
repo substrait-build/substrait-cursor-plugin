@@ -9,7 +9,11 @@
 #                    production). The environment must already exist (the portal's
 #                    environment switcher creates one). Also honoured: $SUBSTRAIT_ENV_TARGET
 #                    and an "environment" key in .substrait/config.json.
-#   --watch          poll the deploy until it finishes and print the preview URL
+#   --watch          poll the deploy until it finishes and print the preview URL; after a
+#                    live deploy to a non-production environment (dev), also wait (≤10 min)
+#                    for that deploy's Dev security scans and print the Go-live verdict
+#                    (clean / N still blocking -> /substrait:fix). Advisory: never fails
+#                    a successful deploy.
 #   --stack <name>   override the recorded backend stack (default: auto-detected from
 #                    backend/ — e.g. fastapi, python, node, go, rust, ruby, java, php,
 #                    dotnet). Ignored for connected apps (the platform detects it).
@@ -44,6 +48,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$DIR/substrait-common.sh"
 
 die() { echo "Error: $*" >&2; exit 1; }
+
+# Where to send a user whose Dev has blocking findings. This script is synced verbatim into
+# the Cursor plugin, which has no /substrait:fix — so name the command only where it ships.
+if [ -f "$DIR/../commands/fix.md" ]; then
+  FIX_NOW="run /substrait:fix"; FIX_LATER="run /substrait:fix later"
+  FIX_PROMOTE="Run /substrait:fix to resolve them."
+else
+  FIX_NOW="fix them from the app's Security tab"; FIX_LATER="check the app's Security tab later"
+  FIX_PROMOTE="The app's Security tab (Fix Wizard) walks through them."
+fi
 
 WATCH=0
 STACK=""
@@ -242,7 +256,14 @@ if [ "$PROMOTE" -eq 1 ]; then
   case "${SUBSTRAIT_STATUS:-}" in
     200|201|202) : ;;
     403) die "not allowed: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
-    404|409) die "promotion not started: $(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail || printf '%s' "$SUBSTRAIT_BODY")" ;;
+    404|409)
+      detail="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail)" || detail="$SUBSTRAIT_BODY"
+      # Dev still has blocking findings (the server's Dev gate): name the command that
+      # fixes them in place, rather than leaving the user to find the Security tab.
+      case "$detail" in
+        *"blocking finding"*) die "promotion not started: $detail $FIX_PROMOTE" ;;
+      esac
+      die "promotion not started: $detail" ;;
     *) die "promotion failed (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY" ;;
   esac
   RUN_ID="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field run_id)" || RUN_ID=""
@@ -386,29 +407,23 @@ STACK="$(printf '%s' "$STACK" | tr '[:upper:]' '[:lower:]')"
 echo "Backend stack: $STACK"
 
 # package DEST — zip the project root, source only. Prefers `zip`; on a stock Windows /
-# Git Bash machine (which has no `zip`) it stages a clean copy with `tar` — reusing the
-# same exclude list — and compresses it with PowerShell's Compress-Archive. Returns 2 when
-# no packager is available so the caller can give an actionable error.
+# Git Bash machine (which has no `zip`) it stages a clean copy with `tar` and compresses it
+# with PowerShell's Compress-Archive. Both paths take their excludes from the ONE list in
+# substrait-common.sh (substrait_{zip,tar}_exclude_args) — the same list the local source
+# fingerprint uses, so /substrait:fix's "is this what's deployed?" check compares like with
+# like. Returns 2 when no packager is available so the caller can give an actionable error.
 package() {
   local dest="$1"
   if command -v zip >/dev/null 2>&1; then
-    zip -rq "$dest" . \
-      -x '.git/*' '*/.git/*' \
-         'node_modules/*' '*/node_modules/*' \
-         '.venv/*' '*/.venv/*' 'venv/*' '*/venv/*' \
-         '__pycache__/*' '*/__pycache__/*' '*.pyc' \
-         'dist/*' '*/dist/*' 'build/*' '*/build/*' \
-         '.substrait/*' '.DS_Store' '*/.DS_Store'
+    substrait_zip_exclude_args
+    zip -rq "$dest" . -x "${SUBSTRAIT_EXCLUDE_ARGS[@]}"
     return $?
   fi
   local ps; ps="$(command -v powershell.exe || command -v pwsh.exe || command -v pwsh || true)"
   if [ -n "$ps" ] && command -v tar >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
     local stage; stage="$(mktemp -d)" || return 1
-    tar -cf - \
-      --exclude='./.git' --exclude='*/.git' --exclude='./node_modules' --exclude='*/node_modules' \
-      --exclude='./.venv' --exclude='*/.venv' --exclude='./venv' --exclude='*/venv' \
-      --exclude='__pycache__' --exclude='*.pyc' --exclude='./dist' --exclude='*/dist' \
-      --exclude='./build' --exclude='*/build' --exclude='./.substrait' --exclude='.DS_Store' . \
+    substrait_tar_exclude_args
+    tar -cf - "${SUBSTRAIT_EXCLUDE_ARGS[@]}" . \
       | tar -xf - -C "$stage" || { rm -rf "$stage"; return 1; }
     "$ps" -NoProfile -NonInteractive -Command \
       "Compress-Archive -Path '$(cygpath -w "$stage")\\*' -DestinationPath '$(cygpath -w "$dest")' -Force" \
@@ -533,6 +548,71 @@ print_events() {
   [ -n "$max" ] && last_seq="$max"
 }
 
+# dev_verdict RUN_ID — after a live deploy to a non-production environment, wait for the
+# Dev security scans of THIS deploy and say where the app stands for Go live: clean, N
+# still blocking (-> /substrait:fix, see FIX_NOW), or which scans didn't complete. Reads
+# GET /api/deploy/security/findings directly — the same set the Go live gate counts — and
+# not via substrait-security.sh, which is not synced into the Cursor plugin while this
+# script is. Advisory only: it never changes the deploy's exit status (always returns 0),
+# and any error or an older portal without the endpoint is one quiet line.
+#
+# "This deploy's scans" = the headline scan's run.deploy_run_id is RUN_ID (an older scan
+# reports an older deploy run until the new one starts) AND no scanner is still running.
+dev_verdict() {
+  local rid="$1" vdeadline head dep running errored blocking running_list errored_list v
+  [ -n "$rid" ] || return 0
+  echo "Waiting for this deploy's Dev security scans (up to 10 min — the app is already live; Ctrl-C is safe)…"
+  vdeadline=$(( $(date +%s) + 600 ))
+  running_list=""; dep=""
+  while :; do
+    if substrait_call GET /api/deploy/security/findings; then :; else
+      echo "(Couldn't read the Dev security verdict — see the app's Security tab.)"; return 0
+    fi
+    case "${SUBSTRAIT_STATUS:-}" in
+      200) ;;
+      *) echo "(No Dev security verdict available (HTTP ${SUBSTRAIT_STATUS:-?}) — see the app's Security tab.)"; return 0 ;;
+    esac
+    # Summary fields precede "scanners"; parsing only that head keeps finding text out.
+    head="${SUBSTRAIT_BODY%%\"scanners\"*}"
+    dep="$(printf '%s' "$head" | _json_field deploy_run_id)" || dep=""
+    running="$(printf '%s' "$head" | _json_field scans_running_total)" || running=""
+    errored="$(printf '%s' "$head" | _json_field scans_errored_total)" || errored=""
+    blocking="$(printf '%s' "$head" | _json_field blocking_total)" || blocking=""
+    running_list="$(printf '%s' "$head" | _json_str_array scans_running)" || running_list=""
+    errored_list="$(printf '%s' "$head" | _json_str_array scans_errored)" || errored_list=""
+    for v in "$running" "$errored" "$blocking"; do
+      case "$v" in
+        ''|*[!0-9]*) echo "(Couldn't parse the Dev security verdict — see the app's Security tab.)"; return 0 ;;
+      esac
+    done
+    # No Dev scanner enabled for the org: no scan will ever report for this deploy, so
+    # there is nothing to wait for. (Empty = an older portal that doesn't send it.)
+    if [ "$(printf '%s' "$head" | _json_field scans_total)" = "0" ]; then
+      echo "No Dev security scanners are enabled for this org — nothing gates Go live here."
+      return 0
+    fi
+    [ "$dep" = "$rid" ] && [ "$running" -eq 0 ] && break
+    if [ "$(date +%s)" -ge "$vdeadline" ]; then
+      if [ "$dep" != "$rid" ]; then
+        echo "! The security scans for this deploy haven't reported yet — $FIX_LATER."
+      else
+        echo "! ${running_list:-Some Dev scans} still running — $FIX_LATER."
+      fi
+      return 0
+    fi
+    sleep 15
+  done
+  if [ "$errored" -gt 0 ]; then
+    echo "! ${errored_list:-Some Dev scans} didn't complete — retry them on the Security tab."
+    [ "$blocking" -gt 0 ] && echo "⚠ $blocking still blocking — $FIX_NOW"
+  elif [ "$blocking" -gt 0 ]; then
+    echo "⚠ $blocking still blocking — $FIX_NOW"
+  else
+    echo "✅ Dev is clean — ready to Go Live"
+  fi
+  return 0
+}
+
 while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 8
   print_events
@@ -552,7 +632,16 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Terminal states: drain any events written after our last fetch (the failure detail
   # usually lands in the same instant as the state flip) before reporting.
   case "$state" in
-    PREVIEW_LIVE) print_events; echo "✅ Live: https://$host"; exit 0 ;;
+    PREVIEW_LIVE)
+      print_events; echo "✅ Live: https://$host"
+      # A deploy to a non-production environment (dev) is what Go live promotes from, so
+      # say whether it is ready to. Never for a promote (the --watch above follows the
+      # target, not Dev) nor for production. Advisory: the exit status stays 0.
+      if [ "${SKIP_TO_WATCH:-0}" -ne 1 ] && [ -n "${target_name:-}" ] \
+         && [ "$(printf '%s' "$target_name" | tr '[:upper:]' '[:lower:]')" != "production" ]; then
+        dev_verdict "$run_id"
+      fi
+      exit 0 ;;
     FAILED|ERROR)
       print_events
       die "deploy failed (state $state) — the ✗ events above say why. Fix the app and re-run /substrait:deploy (full log in the portal, run #$run_id)." ;;

@@ -211,6 +211,184 @@ substrait_anon_call() {
   return $rc
 }
 
+# _json_str_array KEY — read a JSON object from stdin, print obj[KEY] (a flat array of
+# simple strings, e.g. ["semgrep","trivy"]) as one comma-separated line ("semgrep,trivy").
+# Empty output for an empty array; exit 1 if the key is absent. Same flat first-match
+# contract as _json_field: the values are server-controlled slugs with no quotes, commas
+# or brackets inside them.
+_json_str_array() {
+  local key="$1" out
+  out="$(grep -o "\"$key\"[[:space:]]*:[[:space:]]*\[[^]]*\]" | head -1)"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*\[//; s/\]$//' | tr -d '" '
+}
+
+# ── What a deploy ships: the ONE exclude list ───────────────────────────────────
+# The source-only zip (substrait-deploy.sh `package`, zip AND its tar fallback) and the
+# local source fingerprint (substrait_source_fingerprint, compared by /substrait:fix
+# against the one the server stored for the deployed zip) must agree on which files a
+# deploy carries — otherwise the two hashes differ for a reason that is not the source.
+# So the list lives here once, and three generators render it in each tool's syntax.
+# Never copy these names into another script: add to the list instead.
+#
+#   SUBSTRAIT_EXCLUDE_DIRS       directories skipped at ANY depth
+#   SUBSTRAIT_EXCLUDE_ROOT_DIRS  directories skipped only at the project root
+#   SUBSTRAIT_EXCLUDE_FILES      file-name globs skipped at any depth
+#
+# Directories match directories only: a FILE named .git (a worktree / submodule pointer)
+# is not excluded — zip's `.git/*` pattern never matched one, and the fingerprint follows
+# the zip. Space-separated words; globbing is switched off while they are split.
+SUBSTRAIT_EXCLUDE_DIRS=".git node_modules .venv venv __pycache__ dist build"
+SUBSTRAIT_EXCLUDE_ROOT_DIRS=".substrait"
+SUBSTRAIT_EXCLUDE_FILES="*.pyc .DS_Store"
+
+# The generators fill the global array SUBSTRAIT_EXCLUDE_ARGS (bash 3.2 has no way to
+# return an array, and printing words would need an eval to re-split them safely). Use it
+# straight after the call:  substrait_zip_exclude_args; zip -rq out.zip . -x "${SUBSTRAIT_EXCLUDE_ARGS[@]}"
+
+# _substrait_words "LIST" — print each space-separated word of LIST on its own line with
+# pathname expansion off, so "*.pyc" stays a pattern instead of matching files in the CWD.
+_substrait_words() {
+  local w noglob=0
+  case $- in *f*) noglob=1 ;; esac
+  set -f
+  for w in $1; do printf '%s\n' "$w"; done
+  [ "$noglob" -eq 1 ] || set +f
+}
+
+# substrait_zip_exclude_args — `zip -x` patterns. zip matches each pattern against the
+# whole stored path and its `*` also matches "/", so "X/*" is X at the root and "*/X/*" is
+# X anywhere below it.
+substrait_zip_exclude_args() {
+  local w
+  SUBSTRAIT_EXCLUDE_ARGS=()
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("$w/*" "*/$w/*"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_DIRS")
+EOF
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("$w/*"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_ROOT_DIRS")
+EOF
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("$w" "*/$w"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_FILES")
+EOF
+}
+
+# substrait_tar_exclude_args — `tar --exclude=` options for the Windows fallback, which
+# archives "." so member names start with "./".
+substrait_tar_exclude_args() {
+  local w
+  SUBSTRAIT_EXCLUDE_ARGS=()
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("--exclude=./$w" "--exclude=*/$w"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_DIRS")
+EOF
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("--exclude=./$w"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_ROOT_DIRS")
+EOF
+  while IFS= read -r w; do [ -n "$w" ] && SUBSTRAIT_EXCLUDE_ARGS+=("--exclude=$w"); done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_FILES")
+EOF
+}
+
+# substrait_find_prune_expr — a complete `find -L . <expr>` expression that prints every
+# regular file a deploy would ship ("./path" form), pruning the excluded directories.
+substrait_find_prune_expr() {
+  local w first=1
+  SUBSTRAIT_EXCLUDE_ARGS=(-type d "(")
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    [ "$first" -eq 1 ] || SUBSTRAIT_EXCLUDE_ARGS+=(-o); first=0
+    SUBSTRAIT_EXCLUDE_ARGS+=(-name "$w")
+  done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_DIRS")
+EOF
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    [ "$first" -eq 1 ] || SUBSTRAIT_EXCLUDE_ARGS+=(-o); first=0
+    SUBSTRAIT_EXCLUDE_ARGS+=(-path "./$w")
+  done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_ROOT_DIRS")
+EOF
+  SUBSTRAIT_EXCLUDE_ARGS+=(")" -prune -o -type f "!" "(")
+  first=1
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    [ "$first" -eq 1 ] || SUBSTRAIT_EXCLUDE_ARGS+=(-o); first=0
+    SUBSTRAIT_EXCLUDE_ARGS+=(-name "$w")
+  done <<EOF
+$(_substrait_words "$SUBSTRAIT_EXCLUDE_FILES")
+EOF
+  SUBSTRAIT_EXCLUDE_ARGS+=(")" -print)
+}
+
+# ── Hashing ─────────────────────────────────────────────────────────────────────
+# Portable sha256: sha256sum (Linux, Git Bash, recent macOS) -> shasum -a 256 (macOS,
+# Perl) -> openssl. Each reads stdin, so no tool ever sees (or escapes) a file name.
+# $SUBSTRAIT_SHA256_TOOL (sha256sum|shasum|openssl) forces one — the fingerprint test uses
+# it to prove all three agree.
+_substrait_sha256_tool() {
+  case "${SUBSTRAIT_SHA256_TOOL:-}" in
+    sha256sum|shasum|openssl)
+      if command -v "$SUBSTRAIT_SHA256_TOOL" >/dev/null 2>&1; then echo "$SUBSTRAIT_SHA256_TOOL"; return 0; fi
+      echo "SUBSTRAIT_SHA256_TOOL=$SUBSTRAIT_SHA256_TOOL is not installed." >&2; return 2 ;;
+  esac
+  if command -v sha256sum >/dev/null 2>&1; then echo sha256sum
+  elif command -v shasum >/dev/null 2>&1; then echo shasum
+  elif command -v openssl >/dev/null 2>&1; then echo openssl
+  else
+    echo "No sha256 tool found — install coreutils (sha256sum), Perl's shasum, or openssl." >&2
+    return 2
+  fi
+}
+
+# substrait_sha256_stdin — print the sha256 hex of stdin (the hex only). Returns 2 when
+# no sha256 tool exists.
+substrait_sha256_stdin() {
+  local tool out
+  tool="${_SUBSTRAIT_SHA_TOOL:-}"
+  [ -n "$tool" ] || tool="$(_substrait_sha256_tool)" || return 2
+  case "$tool" in
+    sha256sum) out="$(sha256sum)" ;;
+    shasum)    out="$(shasum -a 256)" ;;
+    openssl)   out="$(openssl dgst -sha256 -r)" ;;
+  esac || return 1
+  out="${out%% *}"
+  # Some builds prefix a "\" when they escaped a name; stdin has none, but be exact.
+  printf '%s\n' "${out#\\}"
+}
+
+# substrait_sha256_file FILE — print the sha256 hex of FILE.
+substrait_sha256_file() { substrait_sha256_stdin < "$1"; }
+
+# substrait_source_fingerprint DIR — the SOURCE FINGERPRINT of the files a deploy of DIR
+# would ship right now, exactly as the server computes it for an accepted upload: for
+# every regular file (after the exclude list above), the line "<sha256 hex>  <path>\n"
+# with the path relative to DIR and "/"-separated; lines sorted bytewise by path
+# (LC_ALL=C); the fingerprint is the sha256 hex of their concatenation. Symlinks are
+# followed (`find -L`), as `zip -r` stores what a link points at — the server never sees
+# a link in a plugin-built zip. Paths containing a newline are unsupported (as in zip).
+# Mtimes, permissions and the zip's own bytes do not matter: the same tree deployed from
+# the portal button or another machine gives the same value. Returns 2 when no sha256
+# tool exists, 1 on any other failure — never prints a partial value.
+substrait_source_fingerprint() {
+  local dir="${1:-.}" lines rc
+  _SUBSTRAIT_SHA_TOOL="$(_substrait_sha256_tool)" || return 2
+  [ -d "$dir" ] || { echo "not a directory: $dir" >&2; return 1; }
+  lines="$(
+    cd "$dir" || exit 1
+    substrait_find_prune_expr
+    find -L . "${SUBSTRAIT_EXCLUDE_ARGS[@]}" | LC_ALL=C sort | while IFS= read -r p; do
+      h="$(substrait_sha256_file "$p")" || exit 1
+      printf '%s  %s\n' "$h" "${p#./}"
+    done
+  )"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # $( ) dropped the final newline; every line (the last included) ends in one.
+  if [ -n "$lines" ]; then printf '%s\n' "$lines" | substrait_sha256_stdin
+  else printf '' | substrait_sha256_stdin
+  fi
+}
+
 # ── Deploy-contract compliance ──────────────────────────────────────────────────
 # substrait_compliance_check — audit the CWD (run from the project root) against the
 # cheap, high-value, statically-checkable parts of the deploy contract. This MIRRORS

@@ -26,6 +26,18 @@
 #                                    included. Body to stdout (or FILE); one status
 #                                    line to stderr. Every call is recorded.
 #
+# Data that is in the warehouse or Redash but not a data set yet — ask for it in plain
+# words (never SQL: a curator writes and reviews the query, then you're emailed):
+#
+#   ask-data --title "..." --question "..." --reason "..." [--source "..."] [--filters "..."]
+#                                    --title what to call it; --question what you want to
+#                                    answer (>=10 chars); --reason what you're building
+#                                    (>=10 chars); --source the table / Redash query /
+#                                    report you know of; --filters what you need to
+#                                    filter by.
+#   data-requests                    your data set requests, every state, with the data
+#                                    set that answered each fulfilled one
+#
 # Output is the API's JSON body untouched — the calling agent parses JSON natively,
 # and the pure-shell _json_field helper can't walk arrays anyway.
 #
@@ -263,6 +275,45 @@ cmd_call() {
   fi
 }
 
+cmd_ask_data() {
+  local title="" question="" reason="" source="" filters=""
+  while [ $# -gt 0 ]; do
+    # Without this, a flag given last with no value makes `shift 2` fail (no -e here)
+    # and the loop spins forever.
+    case "$1" in --*) [ $# -ge 2 ] || die "$1 needs a value" ;; esac
+    case "$1" in
+      --title) title="${2:-}"; shift 2 ;;
+      --question) question="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --source) source="${2:-}"; shift 2 ;;
+      --filters) filters="${2:-}"; shift 2 ;;
+      *) die "unknown option: $1 (ask-data takes --title --question --reason [--source] [--filters])" ;;
+    esac
+  done
+  [ "${#title}" -ge 3 ] || die "--title is required: what to call the data set (at least 3 characters)"
+  [ "${#question}" -ge 10 ] || die "--question must be at least 10 characters: what you want to answer with the data"
+  [ "${#reason}" -ge 10 ] || die "--reason must be at least 10 characters: what you're building, and for whom"
+  local body
+  body="{\"title\":$(_json_str "$title"),\"question\":$(_json_str "$question"),\"reason\":$(_json_str "$reason")"
+  [ -n "$source" ] && body="$body,\"source\":$(_json_str "$source")"
+  [ -n "$filters" ] && body="$body,\"filters\":$(_json_str "$filters")"
+  body="$body}"
+  substrait_call POST /api/library/dataset-requests -H 'Content-Type: application/json' --data "$body" || exit $?
+  case "${SUBSTRAIT_STATUS:-}" in
+    201)
+      echo "Asked for the data set '$title'. A library curator publishes it or tells you why not; you'll get an email either way." >&2
+      echo "Once it is published and a data group covering it is granted to you, it appears in 'list'." >&2
+      printf '%s\n' "$SUBSTRAIT_BODY" ;;
+    *) die "request failed (HTTP ${SUBSTRAIT_STATUS:-?}): $(_detail "$SUBSTRAIT_BODY")" ;;
+  esac
+}
+
+cmd_data_requests() {
+  substrait_call GET /api/library/dataset-requests/mine || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not read your data set requests (HTTP ${SUBSTRAIT_STATUS:-?}): $(_detail "$SUBSTRAIT_BODY")"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
 case "${1:-list}" in
   list)    shift || true; cmd_list "$@" ;;
   show)    shift; cmd_show "$@" ;;
@@ -270,5 +321,7 @@ case "${1:-list}" in
   request) shift; cmd_request "$@" ;;
   access)  shift || true; cmd_access "$@" ;;
   call)    shift; cmd_call "$@" ;;
-  *) die "unknown command: ${1}. Use list|show|spec|request|access|call." ;;
+  ask-data)      shift; cmd_ask_data "$@" ;;
+  data-requests) shift || true; cmd_data_requests "$@" ;;
+  *) die "unknown command: ${1}. Use list|show|spec|request|access|call|ask-data|data-requests." ;;
 esac

@@ -63,6 +63,15 @@ to see real responses while designing.
    The data owner decides (30 or 60 days — every grant carries this clock); the
    user gets an email either way.
 
+   **Data that isn't in the library.** When what the user needs lives in the warehouse
+   or Redash but nothing in the catalog covers it, offer to ask for a data set — in the
+   user's words, never SQL (a curator writes and reviews the query):
+   `bash <plugin>/scripts/substrait-library.sh ask-data --title "<what to call it>" --question "<what they want to answer>" --reason "<what they're building, for whom>" [--source "<table, Redash query or report they know>"] [--filters "<date range, hub, …>"]`
+   A curator publishes it or declines with a reason, and the user is emailed either way.
+   The data may already exist but be hidden from them (visibility is per data group), in
+   which case the curator points them at it. `bash <plugin>/scripts/substrait-library.sh data-requests` shows where each of
+   their requests stands. Meanwhile, design against what exists — never invent the data.
+
 4. **Design the app together.** Iterate with the user until the design is concrete:
    - which library APIs it consumes, and which specific endpoints;
    - data flow: what the app stores in its own database vs fetches live;
