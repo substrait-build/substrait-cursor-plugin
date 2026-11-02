@@ -6,7 +6,7 @@
 #   account      [--portal-url URL]         browser flow: authorize the CLI as you;
 #                                           the personal token is fetched automatically
 #   save-account --token TOKEN [--portal-url URL]  fallback: paste an sbt_ token minted
-#                                           on the portal's Access tokens page
+#                                           on the portal's Personal tokens page
 #   whoami                                  verify the account link against the portal
 #                                           and print who it authenticates
 #   logout [--project] [--revoke|--keep-token]
@@ -280,7 +280,7 @@ cmd_save_account() {
       *) die "unknown arg: $1" ;;
     esac
   done
-  [ -n "$token" ] || die "--token is required (create one on the portal's Access tokens page, or use 'account')"
+  [ -n "$token" ] || die "--token is required (create one on the portal's Personal tokens page, or use 'account')"
   [ "${token#sbt_}" != "$token" ] || die "that is not a personal token (sbt_…) — app tokens (sbd_…) go through 'save'"
   portal="${portal:-${SUBSTRAIT_PORTAL_URL:-}}"; [ -n "$portal" ] || die "$_PORTAL_REQUIRED_MSG"; portal="${portal%/}"
 
@@ -459,16 +459,16 @@ cmd_logout() {
         echo "Revoked the personal access token '$tname' (${token:0:12}…) on the portal."
       else
         echo "note: could not revoke the token (HTTP ${SUBSTRAIT_STATUS:-?}) — revoke it on" \
-             "the portal's Access tokens page." >&2
+             "the portal's Personal tokens page." >&2
       fi
     else
       echo "note: '$tname' was minted by you on the portal, not by /substrait:login, so it" \
            "may be in use on another machine — it was NOT revoked. Re-run with --revoke to" \
-           "revoke it, or delete it on the portal's Access tokens page." >&2
+           "revoke it, or delete it on the portal's Personal tokens page." >&2
     fi
   else
     echo "note: could not reach the portal (HTTP ${SUBSTRAIT_STATUS:-?}) — the local link is" \
-         "removed, but the token stays valid until revoked on the Access tokens page." >&2
+         "removed, but the token stays valid until revoked on the Personal tokens page." >&2
   fi
 
   rm -f "$SUBSTRAIT_GLOBAL_CONFIG"

@@ -40,7 +40,7 @@ commands read it from config — the URL is only needed here at login.)
    - `--portal-url` is **required** (the URL from the preamble); the command errors without it.
 
 3. **Headless / CI fallback.** If there is no browser on this machine: the user mints a
-   personal token on the portal's **Access tokens** page (Settings), then
+   personal token on the portal's **Personal tokens** page (account menu), then
    `bash <plugin>/scripts/substrait-link.sh save-account --token <TOKEN> --portal-url <URL>`
    (`--portal-url` **required**). Ask **only for the token**; never echo it back in plain
    text. The script verifies it before saving.

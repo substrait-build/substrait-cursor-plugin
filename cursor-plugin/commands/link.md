@@ -41,8 +41,8 @@ machine/project is already linked, skip straight to binding.
    code; relay both to the user in case the browser didn't open, and tell them to complete
    the authorization in the browser. It blocks until they approve.
    - `--portal-url` is **required** (the URL from the preamble); the command errors without it.
-   - Headless / CI fallback: the user mints a token on the portal's **Access tokens**
-     page, then `bash <plugin>/scripts/substrait-link.sh save-account --token <TOKEN> --portal-url <URL>`
+   - Headless / CI fallback: the user mints a token on the portal's **Personal tokens**
+     page (account menu), then `bash <plugin>/scripts/substrait-link.sh save-account --token <TOKEN> --portal-url <URL>`
      (`--portal-url` required). Ask **only for the token**; never echo it back in plain text.
 
 3. **Bind this project to an app.** With the account link in place:
