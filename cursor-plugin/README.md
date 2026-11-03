@@ -6,10 +6,13 @@ editor. The plugin bundles:
 - the **`substrait-app`** skill — scaffolds a contract-compliant app (FastAPI `backend/`
   on port 8000, `cicd/` Dockerfiles, optional React+Vite+Tailwind `frontend/`, Flyway
   migrations); and
-- six commands:
+- seven commands:
   - **`/substrait:login`** — authenticate this machine with your Substrait account (mints
     the personal access token; one browser authorization, no copy/paste). Each login is a
-    saved **profile** — one installation as one org — so you can hold several and switch.
+    saved **profile** — one installation as one org — so you can hold several.
+  - **`/substrait:switch`** — pick which saved login the machine acts under: lists your
+    profiles and activates the one you choose (a linked folder keeps its own login unless
+    you move it).
   - **`/substrait:logout`** — sign out of one login again: revokes the login-minted token on
     the portal and drops the stored credential (`--profile` picks a saved login,
     `--project` also unbinds this folder).
@@ -54,7 +57,7 @@ saved profile with `SUBSTRAIT_PROFILE=<name>` (handy in CI).
 
 **Several installations or orgs?** Log in to each (`/substrait:login`, with `--org <slug>`
 for an org other than your default — the profile is named after the portal's host, or
-`<org>@<host>`), then switch with `/substrait:login <profile>`. A folder linked under one
+`<org>@<host>`), then switch with `/substrait:switch`. A folder linked under one
 profile keeps deploying there whichever profile is active; `/substrait:logout --profile
 <name>` signs out of just that one.
 

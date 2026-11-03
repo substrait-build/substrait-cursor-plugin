@@ -79,7 +79,8 @@ commands read it from the profile — the URL is only needed here at login.)
    `/substrait:deploy` to ship. This command does **not** bind the current project to
    any app — that's `/substrait:link`.
 
-5. **Switching between saved logins:**
+5. **Switching between saved logins** is `/substrait:switch` (it lists the profiles and
+   asks which). When the user named one here, do the same thing directly:
    `bash <plugin>/scripts/substrait-link.sh use-profile <NAME> [--project]`
    Makes `<NAME>` the active profile: what `/substrait:link` lists apps from and binds
    under, and what unpinned folders use. A folder already linked under another profile
