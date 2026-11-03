@@ -7,8 +7,11 @@ You are linking the current working directory to one app on the **Substrait** pl
 the user can deploy it with `/substrait:deploy`. Two credential models exist:
 
 - **Account link (preferred):** a **personal access token** (`sbt_…`) stored once per
-  machine (`~/.substrait/config.json`). It authenticates the user; each project then just
-  records **which app** it deploys to (a slug in `.substrait/config.json`, no secret).
+  machine as a **profile** (one Substrait installation as one org; the active one is in
+  `~/.substrait/config.json`, see `/substrait:login`). It authenticates the user; each
+  project then just records **which app** it deploys to (a slug in
+  `.substrait/config.json`, no secret) and **which profile** it was linked under, so the
+  folder keeps deploying to that installation and org whatever profile is active later.
 - **Per-app deploy token** (`sbd_…`, the original flow): scoped to a single app, stored in
   the project. Still fully supported — and it wins over the account token if both exist.
 
@@ -28,12 +31,19 @@ it as `--portal-url <URL>`. It's only needed when first writing auth to config; 
 machine/project is already linked, skip straight to binding.
 
 1. **Check current state:** run `bash <plugin>/scripts/substrait-link.sh status`.
-   It reports both layers: whether this machine has an account link, and what this project
-   is bound to. If the project is already linked and the user only wanted to check, you're
-   done.
+   It reports both layers: whether this machine has an account link (which profile, portal
+   and org), and what this project is bound to. If the project is already linked and the
+   user only wanted to check, you're done. If it says the folder is pinned to a profile
+   that is **not on this machine**, the user either signs in to it (`/substrait:login`,
+   `account --profile <that name> --portal-url <URL>`) or re-links under another — don't
+   deploy around it. If the machine has several profiles, the **active** one is what the
+   steps below list apps from and bind under: confirm with the user that it is the
+   installation and org they mean (`bash <plugin>/scripts/substrait-link.sh profiles`;
+   switch with `bash <plugin>/scripts/substrait-link.sh use-profile <NAME>`).
 
 2. **Ensure the account link (once per machine).** If status says there's no account link
-   (also available standalone as `/substrait:login`):
+   (also available standalone as `/substrait:login`, which also covers a second
+   installation or org — `--profile` / `--org`):
    `bash <plugin>/scripts/substrait-link.sh account --portal-url <URL>`
    This opens the Substrait portal in the user's browser, where they (already logged in)
    **authorize Cursor on their account** — the personal token is minted and returned to
@@ -74,8 +84,9 @@ machine/project is already linked, skip straight to binding.
      `bash <plugin>/scripts/substrait-link.sh save --token <TOKEN> --portal-url <URL>`
      (`--portal-url` required).
 
-5. **Confirm** the linked app + preview URL, and remind the user they can now run
-   `/substrait:deploy` to ship the current code.
+5. **Confirm** the linked app + preview URL (and the profile it was linked under, which
+   the script names), and remind the user they can now run `/substrait:deploy` to ship
+   the current code.
 
 Related: how the app *deploys* (zip upload vs GitHub trigger) is a separate, switchable
 choice — `bash <plugin>/scripts/substrait-link.sh modes` shows the current state and

@@ -8,9 +8,11 @@ editor. The plugin bundles:
   migrations); and
 - six commands:
   - **`/substrait:login`** — authenticate this machine with your Substrait account (mints
-    the personal access token; one browser authorization, no copy/paste).
-  - **`/substrait:logout`** — sign this machine out again: revokes the login-minted token on
-    the portal and drops the stored credential (`--project` also unbinds this folder).
+    the personal access token; one browser authorization, no copy/paste). Each login is a
+    saved **profile** — one installation as one org — so you can hold several and switch.
+  - **`/substrait:logout`** — sign out of one login again: revokes the login-minted token on
+    the portal and drops the stored credential (`--profile` picks a saved login,
+    `--project` also unbinds this folder).
   - **`/substrait:link`** — link this project to one of your apps. Opens the portal in your
     browser so you pick the app while logged in; the app-scoped deploy token is fetched
     automatically (no copy/paste). Falls back to pasting a token for headless/CI.
@@ -43,13 +45,22 @@ the `substrait` plugin.)
 **Deploy** tab → **Create deploy token**, copy the `sbd_…` value (shown once), then run
 `/substrait:link` and paste it.
 
-Config is **per project** in `./.substrait/config.json` (chmod 600, gitignored) — portal
-URL + the app-scoped token. You can override with `SUBSTRAIT_PORTAL_URL` / `SUBSTRAIT_TOKEN`
-in the environment.
+Config is **per project** in `./.substrait/config.json` (chmod 600, gitignored) — the app
+slug and the login profile it was linked under (or, with a per-app token, portal URL + the
+app-scoped token). Logins are **profiles** in `~/.substrait/profiles/<name>.json`, one per
+installation-and-org; `~/.substrait/config.json` is the active one. You can override with
+`SUBSTRAIT_PORTAL_URL` / `SUBSTRAIT_TOKEN` / `SUBSTRAIT_ORG` in the environment, or force a
+saved profile with `SUBSTRAIT_PROFILE=<name>` (handy in CI).
+
+**Several installations or orgs?** Log in to each (`/substrait:login`, with `--org <slug>`
+for an org other than your default — the profile is named after the portal's host, or
+`<org>@<host>`), then switch with `/substrait:login <profile>`. A folder linked under one
+profile keeps deploying there whichever profile is active; `/substrait:logout --profile
+<name>` signs out of just that one.
 
 **Portal URL.** Substrait is multi-tenant, so there is no default — the URL is always
 explicit. Supply it once with `/substrait:login --portal-url <URL>` and every later command
-reads it from the config.
+reads it from the profile.
 
 ## Maintainers
 

@@ -5,14 +5,22 @@
 # Two credentials, two config layers:
 #   - deploy token (sbd_…): APP-scoped, PER-PROJECT — lives in this project's
 #     .substrait/config.json (gitignored), written by `substrait-link.sh login|save`.
-#   - personal access token (sbt_…): USER-scoped, GLOBAL — lives in
-#     ~/.substrait/config.json, written by `substrait-link.sh account|save-account`.
-#     A project using a PAT stores only its app "slug" in the project config (no
-#     secret); requests then carry the slug in an X-Substrait-App header.
+#   - personal access token (sbt_…): USER-scoped, held in a PROFILE — one login to one
+#     Substrait installation as one org. Profiles live in ~/.substrait/profiles/<name>.json
+#     (portal_url, token, org, email), written by `substrait-link.sh account|save-account
+#     [--profile NAME] [--org SLUG]`; ~/.substrait/config.json is the ACTIVE profile (the
+#     same keys plus "profile": its name), switched by `substrait-link.sh use-profile`.
+#     A project using a PAT stores only its app "slug" (sent as X-Substrait-App) and the
+#     "profile" it was linked under — no secret. The pin is what keeps a folder deploying
+#     to the same installation and org after the machine's active profile changes.
 # Resolution order (a project token wins over the account token):
-#   portal URL : $SUBSTRAIT_PORTAL_URL  ->  project config  ->  global config
+#   portal URL : $SUBSTRAIT_PORTAL_URL  ->  project config  ->  account file
 #                                       ->  the plugin's own userConfig (see below)
-#   token      : $SUBSTRAIT_TOKEN       ->  project config  ->  global config
+#   token      : $SUBSTRAIT_TOKEN       ->  project config  ->  account file
+#   org        : $SUBSTRAIT_ORG         ->  account file          (sent as X-Substrait-Org)
+#   where the ACCOUNT FILE is $SUBSTRAIT_PROFILE's file -> the project's pinned profile
+#   -> the active profile (~/.substrait/config.json). A pin naming a profile this machine
+#   no longer has is an error, never a silent fall-through to whatever is active.
 #
 # …EXCEPT for USER-SCOPED surfaces (the library, logs), which the server gates on a PAT
 # and refuses an sbd_ token outright. For those, project-first is exactly backwards: a
@@ -23,6 +31,9 @@
 
 SUBSTRAIT_CONFIG_FILE="${SUBSTRAIT_CONFIG_FILE:-.substrait/config.json}"
 SUBSTRAIT_GLOBAL_CONFIG="${SUBSTRAIT_GLOBAL_CONFIG:-$HOME/.substrait/config.json}"
+# One file per saved login (see the profile notes above). Beside the active config, so a
+# test or a CI job that relocates one relocates both.
+SUBSTRAIT_PROFILES_DIR="${SUBSTRAIT_PROFILES_DIR:-$(dirname "$SUBSTRAIT_GLOBAL_CONFIG")/profiles}"
 # The plugin root (this script lives in <root>/scripts/). Used for the userConfig sidecar
 # below; self-locating so the same file works unchanged under Claude Code and Cursor.
 _SUBSTRAIT_PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
@@ -61,15 +72,139 @@ _json_field() {
 # _json_get FILE KEY -> prints the value, or exits 1 if the file or key is absent.
 _json_get() { [ -f "$1" ] || return 1; _json_field "$2" < "$1"; }
 
-# Resolve the portal URL from (in order) the env override, the project config, the global
-# config, and finally the plugin's own userConfig answer (env var when we happen to inherit
-# it, else the sidecar the SessionStart hook writes). Returns 1 (no output) when none is
-# set — there is no default; the caller must surface a "run /substrait:login --portal-url
-# <URL>" message.
+# ── Profiles ────────────────────────────────────────────────────────────────────
+# substrait_profile_name_ok NAME — a profile name is a file name: letters, digits and
+# `.`/`_`/`-`/`@` only, starting with a letter or digit. `@` so the default name of a login
+# pinned to an org reads `<org>@<host>`.
+substrait_profile_name_ok() {
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._@-]*$'
+}
+
+# substrait_profile_file NAME — where profile NAME is (or would be) stored. A name that
+# is not a plain file name (`../x`, a slash) prints nothing and fails: it is spliced into
+# a path that is read as a credential and removed on logout, so it is never trusted from
+# a flag, an env var or a project config.
+substrait_profile_file() {
+  substrait_profile_name_ok "$1" || return 1
+  printf '%s/%s.json' "$SUBSTRAIT_PROFILES_DIR" "$1"
+}
+
+# substrait_project_profile — the profile this folder was linked under (recorded by
+# `substrait-link.sh use|create`). Exit 1 when the folder carries no pin.
+substrait_project_profile() { _json_get "$SUBSTRAIT_CONFIG_FILE" profile; }
+
+# substrait_active_profile — the name of the ACTIVE profile (~/.substrait/config.json's
+# "profile" key). Exit 1 when there is no active config, or it predates profiles (a plain
+# portal_url + token file from before 2026-11 — still honoured as the account file).
+substrait_active_profile() { _json_get "$SUBSTRAIT_GLOBAL_CONFIG" profile; }
+
+# substrait_legacy_profile — the name the machine's pre-profile login was adopted under
+# (`substrait-link.sh` writes it to profiles/.legacy once). Exit 1 when there was none —
+# or when that profile has since been logged out of: a name without a file must never be
+# written as a folder's pin, which would stop every command there.
+substrait_legacy_profile() {
+  [ -f "$SUBSTRAIT_PROFILES_DIR/.legacy" ] || return 1
+  local v f; v="$(head -1 "$SUBSTRAIT_PROFILES_DIR/.legacy" | tr -d '[:space:]')"
+  [ -n "$v" ] && f="$(substrait_profile_file "$v")" && [ -f "$f" ] || return 1
+  printf '%s' "$v"
+}
+
+# substrait_account_file — the file holding the ACCOUNT credential this command should
+# use: $SUBSTRAIT_PROFILE's file (CI / an explicit choice) -> the folder's pinned profile
+# -> for an account-linked folder with no pin, the legacy profile (it predates profiles,
+# so it was linked under the one login the machine had then) -> the active profile.
+# Prints the path, which may not exist (no login yet: callers see _json_get fail exactly
+# as before). Returns 1 WITHOUT printing when the requested or pinned profile is one this
+# machine does not have — that case must stop the command with a clear message rather
+# than quietly run under a different login. substrait_call resolves this once per request
+# into _SUBSTRAIT_AF, which short-circuits the readers it then calls.
+substrait_account_file() {
+  if [ -n "${_SUBSTRAIT_AF:-}" ]; then printf '%s' "$_SUBSTRAIT_AF"; return 0; fi
+  local p f
+  if [ -n "${SUBSTRAIT_PROFILE:-}" ]; then
+    f="$(substrait_profile_file "$SUBSTRAIT_PROFILE")" && [ -f "$f" ] || return 1
+    printf '%s' "$f"; return 0
+  fi
+  if p="$(substrait_project_profile)" && [ -n "$p" ]; then
+    f="$(substrait_profile_file "$p")" && [ -f "$f" ] || return 1
+    printf '%s' "$f"; return 0
+  fi
+  if substrait_app_slug >/dev/null 2>&1 && ! _json_get "$SUBSTRAIT_CONFIG_FILE" token >/dev/null 2>&1 \
+     && p="$(substrait_legacy_profile)"; then
+    substrait_profile_file "$p"; return 0
+  fi
+  printf '%s' "$SUBSTRAIT_GLOBAL_CONFIG"
+}
+
+# substrait_account_profile — the NAME of the profile the account file is (empty for a
+# pre-profile config or no login). What status/whoami print, so the name always matches
+# the portal and org shown next to it.
+substrait_account_profile() {
+  local f; f="$(substrait_account_file)" || return 1
+  _json_get "$f" profile
+}
+
+# substrait_missing_profile_msg — the one wording for "the profile this command needs is
+# not on this machine", printed to stderr by the callers of substrait_account_file.
+substrait_missing_profile_msg() {
+  local p
+  if [ -n "${SUBSTRAIT_PROFILE:-}" ]; then p="$SUBSTRAIT_PROFILE"
+  else p="$(substrait_project_profile 2>/dev/null)"; fi
+  echo "The Substrait profile '$p' is not on this machine — sign in to it with /substrait:login (substrait-link.sh account --profile '$p' --portal-url <URL>), or re-run /substrait:link to bind this project under another profile. Saved profiles: substrait-link.sh profiles." >&2
+}
+
+# substrait_org — the org (tenant slug) requests act in: $SUBSTRAIT_ORG, else the account
+# file's "org". Empty = no header, so the server uses the user's first membership (what
+# every login before profiles did). Lower-cased here, as the server does. An ambient
+# $SUBSTRAIT_TOKEN that is NOT the account file's own token (CI) is somebody else's
+# credential: a profile's org must not be attached to it — only an explicit
+# $SUBSTRAIT_ORG is. (The link script passes the token it read from that very file
+# through $SUBSTRAIT_TOKEN, which is why the comparison, not the presence, decides.)
+substrait_org() {
+  local v f
+  if [ -n "${SUBSTRAIT_ORG:-}" ]; then v="$SUBSTRAIT_ORG"
+  else
+    f="$(substrait_account_file)" || return 1
+    if [ -n "${SUBSTRAIT_TOKEN:-}" ] && [ "$SUBSTRAIT_TOKEN" != "$(_json_get "$f" token 2>/dev/null)" ]; then
+      return 1
+    fi
+    v="$(_json_get "$f" org)" || return 1
+  fi
+  printf '%s' "$v" | tr '[:upper:]' '[:lower:]'
+}
+
+# Resolve the portal URL from (in order) the env override, the config the credential in
+# use came from, the other config, and finally the plugin's own userConfig answer (env var
+# when we happen to inherit it, else the sidecar the SessionStart hook writes). The portal
+# FOLLOWS THE CREDENTIAL: a personal token belongs to a profile, so its installation is the
+# account file's, and a folder holding an app token for another installation must not
+# redirect it; an app token's installation is the project config's. Returns 1 (no output)
+# when none is set — there is no default; the caller must surface a "run /substrait:login
+# --portal-url <URL>" message. Returns 3 when the account file is a profile this machine
+# does not have (the userConfig tiers are NOT consulted then: the folder named its
+# installation, and a different one is never the right answer).
 substrait_portal_url() {
   if [ -n "${SUBSTRAIT_PORTAL_URL:-}" ]; then printf '%s' "${SUBSTRAIT_PORTAL_URL%/}"; return 0; fi
-  local v; if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
-  if v="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+  local v f account_first=0
+  if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then account_first=1
+  elif [ -n "${SUBSTRAIT_TOKEN:-}" ]; then case "$SUBSTRAIT_TOKEN" in sbt_*) account_first=1 ;; esac
+  elif ! _json_get "$SUBSTRAIT_CONFIG_FILE" token >/dev/null 2>&1; then account_first=1
+  fi
+  # A missing pinned profile is a hard stop (3) — unless the token itself came from the
+  # environment: that override is explicit, and the files are then only a hint.
+  if [ "$account_first" -eq 1 ]; then
+    if f="$(substrait_account_file)"; then
+      if v="$(_json_get "$f" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+    elif [ -z "${SUBSTRAIT_TOKEN:-}" ]; then return 3
+    fi
+    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+  else
+    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+    if f="$(substrait_account_file)"; then
+      if v="$(_json_get "$f" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+    elif [ -z "${SUBSTRAIT_TOKEN:-}" ]; then return 3
+    fi
+  fi
   if [ -n "${CLAUDE_PLUGIN_OPTION_PORTAL_URL:-}" ]; then
     printf '%s' "${CLAUDE_PLUGIN_OPTION_PORTAL_URL%/}"; return 0
   fi
@@ -99,11 +234,13 @@ substrait_plugin_version() {
   return 1
 }
 
+# Exit 3 from either token resolver = the account file is a missing profile.
 substrait_token() {
   if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then substrait_account_token; return $?; fi
   if [ -n "${SUBSTRAIT_TOKEN:-}" ]; then printf '%s' "$SUBSTRAIT_TOKEN"; return 0; fi
   if _json_get "$SUBSTRAIT_CONFIG_FILE" token; then return 0; fi
-  _json_get "$SUBSTRAIT_GLOBAL_CONFIG" token
+  local f; f="$(substrait_account_file)" || return 3
+  _json_get "$f" token
 }
 
 # substrait_account_token — the ACCOUNT credential (sbt_) only, skipping the project
@@ -117,7 +254,8 @@ substrait_account_token() {
   case "${SUBSTRAIT_TOKEN:-}" in
     sbt_*) printf '%s' "$SUBSTRAIT_TOKEN"; return 0 ;;
   esac
-  _json_get "$SUBSTRAIT_GLOBAL_CONFIG" token
+  local f; f="$(substrait_account_file)" || return 3
+  _json_get "$f" token
 }
 
 # substrait_app_slug — the app this project is bound to (cached by link). With a
@@ -153,11 +291,27 @@ substrait_env_target() {
 # NEVER inside a command substitution ( x="$(substrait_call ...)" ) — that runs it in a
 # subshell, so the globals it sets would not reach the caller. (That was the original bug.)
 substrait_call() {
+  # Resolve the account file ONCE for the portal, token and org readers below: the deploy
+  # watcher calls this every few seconds for the length of a build, and each reader would
+  # otherwise re-derive it (a few forks each time). Empty = unresolvable; the readers then
+  # report exit 3 themselves.
+  _SUBSTRAIT_AF="$(substrait_account_file 2>/dev/null)" || _SUBSTRAIT_AF=""
+  _substrait_call_resolved "$@"
+  local rc=$?
+  unset _SUBSTRAIT_AF
+  return $rc
+}
+
+_substrait_call_resolved() {
   local method="$1" path="$2"; shift 2
-  local base token tmp slug
+  local base token tmp slug org rc
   base="$(substrait_portal_url)" || {
+    rc=$?
+    if [ "$rc" -eq 3 ]; then substrait_missing_profile_msg; return 2; fi
     echo "No portal URL configured — run /substrait:login --portal-url <your Substrait API URL> (there is no default; you can also set it once as the plugin's 'Substrait portal URL' option)." >&2; return 2; }
   token="$(substrait_token)" || {
+    rc=$?
+    if [ "$rc" -eq 3 ]; then substrait_missing_profile_msg; return 2; fi
     if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then
       echo "This needs an ACCOUNT link — run /substrait:login. (A project deploy token" >&2
       echo "can't be used here; it only authorizes deploys of its own app.)" >&2
@@ -174,6 +328,12 @@ substrait_call() {
     elif [ "${path#/api/deploy}" != "$path" ]; then
       echo "This project isn't bound to an app yet — run /substrait:link to pick one." >&2
       return 2
+    fi
+    # The org (tenant) the person acts in. A personal token spans every org its user
+    # belongs to, and the server defaults to the first membership; the profile's org makes
+    # the choice explicit, which is also what disambiguates a slug that exists in two orgs.
+    if org="$(substrait_org)" && [ -n "$org" ]; then
+      set -- -H "X-Substrait-Org: $org" "$@"
     fi
   fi
   # The deploy environment this command targets (see substrait_env_target). Only the

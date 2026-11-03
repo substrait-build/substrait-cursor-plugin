@@ -2,19 +2,32 @@
 # Link Claude Code to Substrait — either your ACCOUNT (once per machine) or this
 # PROJECT to one app.
 #
-# Account (personal access token, sbt_ — global ~/.substrait/config.json):
-#   account      [--portal-url URL]         browser flow: authorize the CLI as you;
-#                                           the personal token is fetched automatically
-#   save-account --token TOKEN [--portal-url URL]  fallback: paste an sbt_ token minted
-#                                           on the portal's Personal tokens page
+# Account (personal access token, sbt_ — saved as a PROFILE: one login to one Substrait
+# installation as one org, ~/.substrait/profiles/<name>.json; the active one is copied to
+# ~/.substrait/config.json):
+#   account      [--portal-url URL] [--profile NAME] [--org SLUG]
+#                                           browser flow: authorize the CLI as you; the
+#                                           personal token is fetched automatically and
+#                                           saved as profile NAME (default: the portal's
+#                                           host, or ORG@host), which becomes active
+#   save-account --token TOKEN [--portal-url URL] [--profile NAME] [--org SLUG]
+#                                           fallback: paste an sbt_ token minted on the
+#                                           portal's Personal tokens page
+#   profiles                                saved logins: name, portal, org, email, and
+#                                           which is active / pinned by this folder
+#   use-profile NAME [--project]            make NAME the active profile (what apps/use/
+#                                           create and unpinned folders act under);
+#                                           --project also re-pins this folder to it
+#   orgs                                    the orgs the active login belongs to
 #   whoami                                  verify the account link against the portal
-#                                           and print who it authenticates
-#   logout [--project] [--revoke|--keep-token]
-#                                           undo `account`: revoke the personal token on
-#                                           the portal (when this flow minted it) and
-#                                           delete ~/.substrait/config.json; --project
-#                                           also unbinds this project
-# Project (with an account link in place — no per-project secret):
+#                                           and print who it authenticates (and where)
+#   logout [--profile NAME] [--project] [--revoke|--keep-token]
+#                                           undo `account` for the active profile (or
+#                                           NAME): revoke the personal token on the portal
+#                                           (when this flow minted it) and delete the
+#                                           profile; --project also unbinds this project
+# Project (with an account link in place — no per-project secret; the folder records the
+# profile it was linked under and every later command in it uses that login):
 #   apps                                    list your apps (slug + name), to pick from
 #   use    --app SLUG                       bind this project to an existing app
 #   create --name NAME [--repo OWNER/REPO] [--branch BR]
@@ -38,7 +51,10 @@
 #   status                                  show account link + this project's binding
 #
 # Project config is ./.substrait/config.json (gitignored): a deploy token binds by
-# credential; an account link binds by "slug" only, sent as X-Substrait-App.
+# credential; an account link binds by "slug" only, sent as X-Substrait-App, plus the
+# "profile" the slug was resolved under (so the folder is pinned to that installation
+# and org — the active profile may change under it without retargeting a deploy).
+# $SUBSTRAIT_PROFILE=NAME forces one profile for a command (CI, or a one-off).
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -81,15 +97,104 @@ _write_config() {
   fi
 }
 
-# _write_global_config PORTAL TOKEN — write the account-level ~/.substrait/config.json
-# (0600). Holds the personal access token every project on this machine falls back to.
+# _account_json PORTAL TOKEN [PROFILE] [ORG] [EMAIL] — the body of an account file (a
+# profile, or the active config, which is a profile plus its name). Built by hand (no
+# python): a URL, an sbt_ token, a file-name-safe profile name, an org slug and an email
+# — none carry JSON-special characters.
+_account_json() {
+  local portal="$1" token="$2" profile="${3:-}" org="${4:-}" email="${5:-}"
+  printf '{\n  "portal_url": "%s",\n  "token": "%s"' "${portal%/}" "$token"
+  [ -n "$profile" ] && printf ',\n  "profile": "%s"' "$profile"
+  [ -n "$org" ] && printf ',\n  "org": "%s"' "$org"
+  [ -n "$email" ] && printf ',\n  "email": "%s"' "$email"
+  printf '\n}\n'
+}
+
+# _write_global_config PORTAL TOKEN [PROFILE] [ORG] [EMAIL] — write the ACTIVE account
+# file ~/.substrait/config.json (0600): the personal access token every unpinned project
+# on this machine falls back to, and the login apps/use/create act under.
 _write_global_config() {
-  local portal="$1" token="$2"
   mkdir -p "$(dirname "$SUBSTRAIT_GLOBAL_CONFIG")"
-  umask 177
-  { printf '{\n  "portal_url": "%s",\n  "token": "%s"\n}\n' "${portal%/}" "$token"
-  } > "$SUBSTRAIT_GLOBAL_CONFIG"
+  # umask in a subshell: these writers run back to back in one process (profile, then
+  # active config, then a project ref), and a leaked 177 would make the next mkdir
+  # unenterable.
+  (umask 177; _account_json "$@" > "$SUBSTRAIT_GLOBAL_CONFIG")
   chmod 600 "$SUBSTRAIT_GLOBAL_CONFIG"
+}
+
+# _write_profile NAME PORTAL TOKEN [ORG] [EMAIL] — save one login under
+# ~/.substrait/profiles/NAME.json (0600).
+_write_profile() {
+  local name="$1"; shift
+  local portal="$1" token="$2" org="${3:-}" email="${4:-}"
+  mkdir -p "$SUBSTRAIT_PROFILES_DIR"
+  (umask 177; _account_json "$portal" "$token" "$name" "$org" "$email" > "$(substrait_profile_file "$name")")
+  chmod 600 "$(substrait_profile_file "$name")"
+}
+
+# _activate_profile NAME — copy profile NAME over the active config. The profile file
+# stays the record; the active config is a cache of "the one I chose".
+_activate_profile() {
+  local f; f="$(substrait_profile_file "$1")"
+  [ -f "$f" ] || { die "no profile named '$1' — run 'profiles' for the list."; return 1; }
+  _write_global_config "$(_json_get "$f" portal_url)" "$(_json_get "$f" token)" "$1" \
+    "$(_json_get "$f" org 2>/dev/null || true)" "$(_json_get "$f" email 2>/dev/null || true)"
+}
+
+# _portal_host URL — the host of a portal URL, the default profile name.
+_portal_host() { local h="${1#*://}"; h="${h%%/*}"; printf '%s' "${h%%:*}"; }
+
+# _adopt_legacy_global — a ~/.substrait/config.json from before profiles (portal_url +
+# token, no "profile") keeps working as the account file; this gives it a name — the
+# portal's host — and a profile file, so the first `account --profile` or `use-profile`
+# does not discard a login the user still needs. The name is also recorded as the LEGACY
+# profile (profiles/.legacy): every account-linked folder with no pin was linked under
+# that login, and substrait_account_file keeps resolving those folders to it — so a later
+# login to a second installation does not retarget them. Idempotent. An existing profile
+# file under that name is kept unless its token differs: the config.json is what this
+# machine was actually using, and its token must be the one a logout revokes.
+_adopt_legacy_global() {
+  [ -f "$SUBSTRAIT_GLOBAL_CONFIG" ] || return 0
+  _json_get "$SUBSTRAIT_GLOBAL_CONFIG" profile >/dev/null 2>&1 && return 0
+  local portal token name f
+  portal="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" portal_url 2>/dev/null)" || return 0
+  token="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" token 2>/dev/null)" || return 0
+  name="$(_portal_host "$portal")"
+  substrait_profile_name_ok "$name" || name="default"
+  f="$(substrait_profile_file "$name")"
+  if [ ! -f "$f" ] || [ "$(_json_get "$f" token 2>/dev/null)" != "$token" ]; then
+    _write_profile "$name" "$portal" "$token"
+  fi
+  _write_global_config "$portal" "$token" "$name"
+  [ -f "$SUBSTRAIT_PROFILES_DIR/.legacy" ] || printf '%s\n' "$name" > "$SUBSTRAIT_PROFILES_DIR/.legacy"
+  echo "Saved this machine's existing login as the profile '$name'." >&2
+}
+
+# _need_account_token — the personal token for a command that cannot run without one,
+# or die. One message per failure: a pin to a profile the machine lacks is already
+# explained by _account_token (exit 3) and must not be followed by "no account link".
+_need_account_token() {
+  local t rc
+  t="$(_account_token)"; rc=$?
+  [ "$rc" -eq 3 ] && exit 1
+  [ "$rc" -eq 0 ] || die "${1:-no account link on this machine — run /substrait:login to authorize your account first.}"
+  printf '%s' "$t"
+}
+
+# _use_active_profile — make the bind-time commands (apps/use/create/repos) act under
+# the ACTIVE profile even in a folder pinned to another: binding is "this folder → this
+# app on the login I just chose", and the pin is what the bind WRITES. Exports
+# SUBSTRAIT_PROFILE (respecting one already set) so substrait_call resolves the same
+# login for the portal URL and the org header. Dies when there is no login at all.
+_use_active_profile() {
+  [ -n "${SUBSTRAIT_PROFILE:-}" ] && return 0
+  _adopt_legacy_global
+  local name
+  if name="$(substrait_active_profile)" && [ -f "$(substrait_profile_file "$name")" ]; then
+    export SUBSTRAIT_PROFILE="$name"
+  fi
+  # No active profile but an ambient $SUBSTRAIT_TOKEN: let the env override carry it.
+  return 0
 }
 
 # _write_project_ref SLUG [HOST] [reset] — bind this project to an app WITHOUT a secret
@@ -97,7 +202,7 @@ _write_global_config() {
 # .substrait/ is gitignored like _write_config. A third arg DROPS any recorded
 # deploy_mode instead of preserving it.
 _write_project_ref() {
-  local slug="$1" host="${2:-}" reset="${3:-}" mode env
+  local slug="$1" host="${2:-}" reset="${3:-}" mode env profile
   # The environment pin follows the same rule as the mode: kept across rewrites, dropped
   # when binding to a different app (a pin for the previous app says nothing about this one).
   if [ -n "$reset" ]; then env=""
@@ -112,10 +217,27 @@ _write_project_ref() {
   else
     mode="$(_json_get "$SUBSTRAIT_CONFIG_FILE" deploy_mode 2>/dev/null)" || mode=""
   fi
+  # The profile pin: on a bind, the login the slug was resolved under ($SUBSTRAIT_PROFILE,
+  # set by _use_active_profile — else the active profile, else the pin already here, which
+  # is the login substrait_account_file fell back to); on a rewrite, whatever was pinned —
+  # backfilled with the legacy profile for a pre-profile folder, which is what it resolves
+  # to anyway (substrait_account_file).
+  if [ -n "$reset" ]; then
+    profile="${SUBSTRAIT_PROFILE:-}"
+    [ -n "$profile" ] || profile="$(substrait_active_profile 2>/dev/null)" || profile=""
+    [ -n "$profile" ] || profile="$(_json_get "$SUBSTRAIT_CONFIG_FILE" profile 2>/dev/null)" || profile=""
+  else
+    # A re-pin of the same app (use-profile --project) names the profile and keeps the
+    # rest; any other rewrite keeps the pin.
+    profile="${SUBSTRAIT_PROFILE:-}"
+    [ -n "$profile" ] || profile="$(_json_get "$SUBSTRAIT_CONFIG_FILE" profile 2>/dev/null)" || profile=""
+    [ -n "$profile" ] || profile="$(substrait_legacy_profile 2>/dev/null)" || profile=""
+  fi
   mkdir -p .substrait
   umask 177
   { printf '{\n  "slug": "%s"' "$slug"
     [ -n "$host" ] && printf ',\n  "host": "%s"' "$host"
+    [ -n "$profile" ] && printf ',\n  "profile": "%s"' "$profile"
     [ -n "$mode" ] && printf ',\n  "deploy_mode": "%s"' "$mode"
     [ -n "$env" ] && printf ',\n  "environment": "%s"' "$env"
     printf '\n}\n'
@@ -131,12 +253,17 @@ _write_project_ref() {
 # _write_deploy_mode MODE — record the project's chosen deploy path (upload|connect)
 # in the project config, preserving every other key. `/substrait:deploy` honors it.
 _write_deploy_mode() {
-  local mode="$1" portal token slug host env
+  local mode="$1" portal token slug host env profile
   env="$(_json_get "$SUBSTRAIT_CONFIG_FILE" environment 2>/dev/null)" || env=""
   portal="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url 2>/dev/null)" || portal=""
   token="$(_json_get "$SUBSTRAIT_CONFIG_FILE" token 2>/dev/null)" || token=""
   slug="$(_json_get "$SUBSTRAIT_CONFIG_FILE" slug 2>/dev/null)" || slug=""
   host="$(_json_get "$SUBSTRAIT_CONFIG_FILE" host 2>/dev/null)" || host=""
+  profile="$(_json_get "$SUBSTRAIT_CONFIG_FILE" profile 2>/dev/null)" || profile=""
+  # A pre-profile account-linked folder gets its pin backfilled (see _write_project_ref).
+  if [ -z "$profile" ] && [ -z "$token" ] && [ -n "$slug" ]; then
+    profile="$(substrait_legacy_profile 2>/dev/null)" || profile=""
+  fi
   mkdir -p .substrait
   umask 177
   { printf '{\n  "deploy_mode": "%s"' "$mode"
@@ -144,24 +271,171 @@ _write_deploy_mode() {
     [ -n "$token" ] && printf ',\n  "token": "%s"' "$token"
     [ -n "$slug" ] && printf ',\n  "slug": "%s"' "$slug"
     [ -n "$host" ] && printf ',\n  "host": "%s"' "$host"
+    [ -n "$profile" ] && printf ',\n  "profile": "%s"' "$profile"
     [ -n "$env" ] && printf ',\n  "environment": "%s"' "$env"
     printf '\n}\n'
   } > "$SUBSTRAIT_CONFIG_FILE"
   chmod 600 "$SUBSTRAIT_CONFIG_FILE"
 }
 
-# _account_token — the effective PERSONAL token (env or global config), if any.
-# Project-level sbd_ tokens are deliberately excluded: account subcommands must not
-# silently run on an app-scoped credential.
+# _account_token — the effective PERSONAL token (env, or the account file: the forced /
+# pinned / active profile), if any. Project-level sbd_ tokens are deliberately excluded:
+# account subcommands must not silently run on an app-scoped credential. A pin naming a
+# profile this machine lacks dies here with the shared message.
 _account_token() {
-  local t
-  if [ -n "${SUBSTRAIT_TOKEN:-}" ] && [ "${SUBSTRAIT_TOKEN#sbt_}" != "$SUBSTRAIT_TOKEN" ]; then
-    printf '%s' "$SUBSTRAIT_TOKEN"; return 0
+  local t rc
+  t="$(substrait_account_token)"; rc=$?
+  # Runs inside the caller's $( ), so the message is all that can escape: print it and
+  # fail; the caller's own die line then names the command that could not run.
+  if [ "$rc" -eq 3 ]; then substrait_missing_profile_msg; return 3; fi
+  [ "$rc" -eq 0 ] && [ "${t#sbt_}" != "$t" ] || return 1
+  printf '%s' "$t"
+}
+
+# ── /api/auth/me readers ───────────────────────────────────────────────────────
+# _json_balanced KEY — print the object or array that `"KEY":` opens in the JSON on
+# stdin, cut at its MATCHING bracket by depth (string contents included: the values here
+# are server-controlled slugs and names, which may carry a bracket but never a quote).
+# Nothing when KEY is absent or scalar (`"org": null`).
+_json_balanced() {
+  awk -v key="\"$1\"" '
+    {
+      i = index($0, key)
+      if (i == 0) next
+      s = substr($0, i + length(key))
+      k = index(s, ":"); if (k == 0) next
+      s = substr(s, k + 1); sub(/^[[:space:]]+/, "", s)
+      ob = substr(s, 1, 1)
+      if (ob == "{") cb = "}"; else if (ob == "[") cb = "]"; else next
+      depth = 0
+      for (n = 1; n <= length(s); n++) {
+        c = substr(s, n, 1)
+        if (c == ob) depth++
+        if (c == cb) { depth--; if (depth == 0) { print substr(s, 1, n); exit } }
+      }
+    }'
+}
+
+# _me_org_slug — the slug of the ACTIVE org in the /api/auth/me body on stdin. The body
+# carries `"org": {…}` once (null for a platform-scoped user with no membership); the
+# object's own "slug" is read, never the first "slug" in the body (memberships follow).
+# The object nests others (`modes`), which are blanked before the slug is read — key
+# order must not matter.
+_me_org_slug() {
+  _json_balanced org | sed 's/^{//; s/}$//' | sed 's/{[^{}]*}//g; s/{[^{}]*}//g' | _json_field slug
+}
+
+# _me_memberships — `slug<TAB>name` per org the user belongs to, from the /api/auth/me
+# body on stdin: the memberships array (balanced — a `]` in a display name is fine),
+# one flat object per line.
+_me_memberships() {
+  _json_balanced memberships | sed 's/^\[//; s/\]$//' \
+    | sed 's/},[[:space:]]*{/}\
+{/g' | awk '
+    {
+      slug=""; name=""
+      if (match($0, /"slug"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+        s=substr($0,RSTART,RLENGTH); sub(/^"slug"[[:space:]]*:[[:space:]]*"/,"",s); sub(/"$/,"",s); slug=s }
+      if (match($0, /"name"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+        s=substr($0,RSTART,RLENGTH); sub(/^"name"[[:space:]]*:[[:space:]]*"/,"",s); sub(/"$/,"",s); name=s }
+      if (slug != "") printf "%s\t%s\n", slug, name
+    }'
+}
+
+# _verify_account PORTAL TOKEN [ORG] — GET /api/auth/me as TOKEN (in ORG when given) and
+# leave the body in SUBSTRAIT_BODY. Dies on an unreachable portal, a rejected token, or an
+# org the user is not a member of — listing the orgs they ARE in, so the fix is one
+# `--org` away.
+_verify_account() {
+  local portal="$1" token="$2" org="${3:-}"
+  if [ -n "$org" ]; then
+    substrait_anon_call GET "$portal/api/auth/me" -H "Authorization: Bearer $token" \
+      -H "X-Substrait-Org: $org" || { die "could not reach $portal"; return 1; }
+  else
+    substrait_anon_call GET "$portal/api/auth/me" -H "Authorization: Bearer $token" \
+      || { die "could not reach $portal"; return 1; }
   fi
-  if t="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" token)" && [ "${t#sbt_}" != "$t" ]; then
-    printf '%s' "$t"; return 0
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] && return 0
+  local status="$SUBSTRAIT_STATUS" body="$SUBSTRAIT_BODY"
+  if [ -n "$org" ] && [ "$status" = "403" ]; then
+    local rows=""
+    if substrait_anon_call GET "$portal/api/auth/me" -H "Authorization: Bearer $token" \
+       && [ "${SUBSTRAIT_STATUS:-}" = "200" ]; then
+      rows="$(printf '%s' "$SUBSTRAIT_BODY" | _me_memberships | cut -f1 | tr '\n' ' ')"
+    fi
+    die "you are not a member of the org '$org' on $portal${rows:+ — your orgs there: $rows}"
+    return 1
   fi
+  die "token rejected (HTTP $status): $body"
   return 1
+}
+
+# _profile_defaults PROFILE PORTAL ORG — the shared argument rules of `account` and
+# `save-account`: validate the name, lower-case the org, and when a saved --profile is
+# being re-authenticated with no --portal-url / --org, reuse the ones it recorded. Sets
+# _PD_PORTAL and _PD_ORG for the caller (two values; bash returns one).
+_PROFILE_NAME_RULE="use letters, digits, '.', '_', '-' or '@', starting with a letter or digit"
+_profile_defaults() {
+  local profile="$1" f
+  _PD_PORTAL="$2"; _PD_ORG="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
+  [ -z "$profile" ] || substrait_profile_name_ok "$profile" || die "profile name '$profile' — $_PROFILE_NAME_RULE"
+  if [ -z "$_PD_PORTAL" ] && [ -n "$profile" ] && f="$(substrait_profile_file "$profile")" && [ -f "$f" ]; then
+    _PD_PORTAL="$(_json_get "$f" portal_url)"
+    [ -n "$_PD_ORG" ] || _PD_ORG="$(_json_get "$f" org 2>/dev/null)" || _PD_ORG=""
+  fi
+  _PD_PORTAL="${_PD_PORTAL:-${SUBSTRAIT_PORTAL_URL:-}}"
+  [ -n "$_PD_PORTAL" ] || die "$_PORTAL_REQUIRED_MSG"
+  _PD_PORTAL="${_PD_PORTAL%/}"
+}
+
+# _retire_token PORTAL TOKEN WHAT — best effort, when a login REPLACES a saved one: revoke
+# the previous token on its portal if the device-link flow minted it (the logout rule),
+# else say it is still live. A dead or unreachable token is silently left alone — the new
+# login must succeed either way.
+_retire_token() {
+  local portal="$1" old="$2" what="$3" row tid tname
+  substrait_anon_call GET "$portal/api/me/tokens" -H "Authorization: Bearer $old" 2>/dev/null \
+    && [ "${SUBSTRAIT_STATUS:-}" = "200" ] || return 0
+  row="$(_token_row_by_prefix "${old:0:12}")"
+  tid="$(printf '%s' "$row" | cut -f1)"; tname="$(printf '%s' "$row" | cut -f2)"
+  [ -n "$tid" ] || return 0
+  if [ "$tname" = "$_LINK_TOKEN_NAME" ]; then
+    substrait_anon_call DELETE "$portal/api/me/tokens/$tid" -H "Authorization: Bearer $old" 2>/dev/null
+    [ "${SUBSTRAIT_STATUS:-}" = "204" ] && echo "Revoked the previous token of $what (${old:0:12}…) on the portal."
+  else
+    echo "note: the previous token of $what ('$tname', ${old:0:12}…) was minted on the portal, not by a login, so it was NOT revoked — delete it on the Personal tokens page if it is no longer used elsewhere." >&2
+  fi
+  return 0
+}
+
+# _save_login PORTAL TOKEN PROFILE ORG — the tail of `account` / `save-account`: verify
+# (which also resolves the org actually in effect and the email), save the profile, make
+# it active, and say so.
+_save_login() {
+  local portal="$1" token="$2" profile="$3" org="$4" email eff f old
+  _adopt_legacy_global
+  _verify_account "$portal" "$token" "$org" || return 1
+  email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)" || email=""
+  # Default name: the portal's host — `ORG@host` when the org was chosen explicitly, so a
+  # second org on the same installation does not overwrite the first login.
+  if [ -z "$profile" ]; then
+    profile="$(_portal_host "$portal")"
+    [ -n "$org" ] && profile="$org@$profile"
+  fi
+  # Record the org the server resolved — explicit from here on, so the profile keeps
+  # meaning this org even after the user joins another.
+  eff="$(printf '%s' "$SUBSTRAIT_BODY" | _me_org_slug)" || eff=""
+  org="${org:-$eff}"
+  f="$(substrait_profile_file "$profile")" || die "profile name '$profile' — $_PROFILE_NAME_RULE"
+  # Same name, different token: this login REPLACES that one — a credential the machine
+  # forgets must not stay live on the portal.
+  if [ -f "$f" ] && old="$(_json_get "$f" token 2>/dev/null)" && [ -n "$old" ] && [ "$old" != "$token" ]; then
+    _retire_token "$(_json_get "$f" portal_url 2>/dev/null || printf '%s' "$portal")" "$old" "profile '$profile'"
+  fi
+  _write_profile "$profile" "$portal" "$token" "$org" "$email"
+  _write_global_config "$portal" "$token" "$profile" "$org" "$email"
+  echo "Linked this machine to your Substrait account${email:+ ($email)} on $portal${org:+ as org '$org'} — saved as the profile '$profile' (now active)."
+  echo "In any project: /substrait:link picks (or creates) the app it deploys to."
 }
 
 cmd_login() {
@@ -219,14 +493,16 @@ cmd_login() {
 # ── Account-level linking (personal access token, global config) ────────────────
 
 cmd_account() {
-  local portal=""
+  local portal="" profile="" org=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --portal-url) portal="$2"; shift 2 ;;
+      --profile) profile="$2"; shift 2 ;;
+      --org) org="$2"; shift 2 ;;
       *) die "unknown arg: $1" ;;
     esac
   done
-  portal="${portal:-${SUBSTRAIT_PORTAL_URL:-}}"; [ -n "$portal" ] || die "$_PORTAL_REQUIRED_MSG"; portal="${portal%/}"
+  _profile_defaults "$profile" "$portal" "$org"; portal="$_PD_PORTAL"; org="$_PD_ORG"
 
   # 1. Start an ACCOUNT-scope device link — the browser will authorize the CLI as the
   #    user (no app picking) and mint a personal access token.
@@ -262,59 +538,155 @@ cmd_account() {
     esac
   done
 
-  # 4. Persist the personal token GLOBALLY — every project on this machine can use it.
-  local token email
+  # 4. Persist the personal token as a profile (and make it the active one) — every
+  #    project on this machine can use it.
+  local token
   token="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field token)" || die "no token in approval"
-  email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)"
-  _write_global_config "$portal" "$token"
-  echo "Linked this machine to your Substrait account${email:+ ($email)}."
-  echo "In any project: /substrait:link picks (or creates) the app it deploys to."
+  _save_login "$portal" "$token" "$profile" "$org"
 }
 
 cmd_save_account() {
-  local portal="" token=""
+  local portal="" token="" profile="" org=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --portal-url) portal="$2"; shift 2 ;;
       --token) token="$2"; shift 2 ;;
+      --profile) profile="$2"; shift 2 ;;
+      --org) org="$2"; shift 2 ;;
       *) die "unknown arg: $1" ;;
     esac
   done
   [ -n "$token" ] || die "--token is required (create one on the portal's Personal tokens page, or use 'account')"
   [ "${token#sbt_}" != "$token" ] || die "that is not a personal token (sbt_…) — app tokens (sbd_…) go through 'save'"
-  portal="${portal:-${SUBSTRAIT_PORTAL_URL:-}}"; [ -n "$portal" ] || die "$_PORTAL_REQUIRED_MSG"; portal="${portal%/}"
+  _profile_defaults "$profile" "$portal" "$org"; portal="$_PD_PORTAL"; org="$_PD_ORG"
 
-  # Verify the token before persisting it.
-  substrait_anon_call GET "$portal/api/auth/me" -H "Authorization: Bearer $token" \
-    || die "could not reach $portal"
-  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "token rejected (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
-  local email; email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)"
-  _write_global_config "$portal" "$token"
-  echo "Linked this machine to your Substrait account${email:+ ($email)}."
-  echo "In any project: /substrait:link picks (or creates) the app it deploys to."
+  # _save_login verifies the token before persisting it.
+  _save_login "$portal" "$token" "$profile" "$org"
+}
+
+# ── Profiles: list, switch, orgs ───────────────────────────────────────────────
+
+# _profile_names — every saved profile, one per line, sorted.
+_profile_names() {
+  [ -d "$SUBSTRAIT_PROFILES_DIR" ] || return 0
+  local f
+  for f in "$SUBSTRAIT_PROFILES_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    f="${f##*/}"; printf '%s\n' "${f%.json}"
+  done | LC_ALL=C sort
+}
+
+cmd_profiles() {
+  _adopt_legacy_global
+  local active pinned name f portal org email mark
+  active="$(substrait_active_profile 2>/dev/null)" || active=""
+  pinned="$(substrait_project_profile 2>/dev/null)" || pinned=""
+  local names; names="$(_profile_names)"
+  if [ -z "$names" ]; then
+    echo "No saved profiles — run /substrait:login to sign in to a Substrait installation." >&2
+    return 1
+  fi
+  # name<TAB>portal<TAB>org<TAB>email<TAB>marks — marks: `active`, `pinned` (this
+  # folder), both comma-joined, or `-`.
+  while IFS= read -r name; do
+    f="$(substrait_profile_file "$name")"
+    portal="$(_json_get "$f" portal_url 2>/dev/null)" || portal=""
+    org="$(_json_get "$f" org 2>/dev/null)" || org=""
+    email="$(_json_get "$f" email 2>/dev/null)" || email=""
+    mark=""
+    [ "$name" = "$active" ] && mark="active"
+    [ "$name" = "$pinned" ] && mark="${mark:+$mark,}pinned"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$portal" "${org:--}" "${email:--}" "${mark:--}"
+  done <<EOF
+$names
+EOF
+  [ -n "$pinned" ] && [ ! -f "$(substrait_profile_file "$pinned")" ] \
+    && echo "note: this project is pinned to the profile '$pinned', which is not on this machine." >&2
+  return 0
+}
+
+cmd_use_profile() {
+  local name="" project=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project=1; shift ;;
+      -*) die "unknown arg: $1" ;;
+      *) [ -z "$name" ] || die "one profile name only"; name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "a profile name is required (run 'profiles' for the list)"
+  substrait_profile_name_ok "$name" || die "profile name '$name' — $_PROFILE_NAME_RULE"
+  _adopt_legacy_global
+  _activate_profile "$name" || return 1
+  local f portal org
+  f="$(substrait_profile_file "$name")"
+  portal="$(_json_get "$f" portal_url 2>/dev/null)" || portal=""
+  org="$(_json_get "$f" org 2>/dev/null)" || org=""
+  echo "Active profile: '$name' ($portal${org:+, org '$org'})."
+  if [ -n "$project" ]; then
+    local slug
+    if slug="$(substrait_app_slug 2>/dev/null)" && [ -n "$slug" ]; then
+      # Re-pin the SAME app: rewrite the ref under the new profile, keeping its deploy
+      # mode and environment pin, and prove the slug resolves there.
+      SUBSTRAIT_PROFILE="$name" _bind_project "$slug" "$(_json_get "$f" token)" "" keep
+    else
+      echo "This project is not bound to an app — run /substrait:link to pick one under '$name'."
+    fi
+  else
+    local pinned
+    if pinned="$(substrait_project_profile 2>/dev/null)" && [ -n "$pinned" ] && [ "$pinned" != "$name" ]; then
+      echo "This project stays pinned to '$pinned' — its deploys are unaffected. Re-run with --project to move it to '$name'."
+    fi
+  fi
+}
+
+cmd_orgs() {
+  _use_active_profile
+  local token portal; token="$(_need_account_token)" || exit 1
+  portal="$(SUBSTRAIT_REQUIRE_ACCOUNT=1 substrait_portal_url)" || die "the account link is missing its portal URL — re-run /substrait:login --portal-url <your Substrait API URL>."
+  SUBSTRAIT_TOKEN="$token" substrait_call GET /api/auth/me || exit $?
+  # Left the org the profile records (403)? The question is still "which orgs CAN I
+  # pick" — ask again with no org header, which the server answers for any member.
+  if [ "${SUBSTRAIT_STATUS:-}" = "403" ]; then
+    substrait_anon_call GET "$portal/api/auth/me" -H "Authorization: Bearer $token" || exit $?
+  fi
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not read your account (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
+  local active rows
+  active="$(printf '%s' "$SUBSTRAIT_BODY" | _me_org_slug)" || active=""
+  rows="$(printf '%s' "$SUBSTRAIT_BODY" | _me_memberships)"
+  if [ -z "$rows" ]; then
+    echo "Your account belongs to no org on this installation${active:+ (acting as '$active')}." >&2
+    return 1
+  fi
+  # slug<TAB>name<TAB>active|-
+  printf '%s\n' "$rows" | awk -F'\t' -v a="$active" '{ printf "%s\t%s\t%s\n", $1, $2, ($1 == a ? "active" : "-") }'
 }
 
 cmd_whoami() {
-  local token portal email
-  token="$(_account_token)" || {
-    echo "No account link on this machine — run /substrait:login to authorize your account."
+  local token portal email org profile f rc
+  _adopt_legacy_global
+  # An ACCOUNT question: the portal is the profile's, whatever app token this folder holds.
+  export SUBSTRAIT_REQUIRE_ACCOUNT=1
+  token="$(_account_token)"; rc=$?
+  [ "$rc" -eq 3 ] && exit 1
+  [ "$rc" -eq 0 ] || {
+    local n; n="$(_profile_names | tr '\n' ' ')"
+    echo "No account link on this machine — run /substrait:login to authorize your account.${n:+ Saved profiles (none active): $n— 'use-profile NAME' activates one.}"
     exit 1
   }
-  if [ -n "${SUBSTRAIT_PORTAL_URL:-}" ]; then
-    portal="${SUBSTRAIT_PORTAL_URL%/}"
-  else
-    portal="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" portal_url)" \
-      || die "the account link is missing its portal URL — re-run /substrait:login --portal-url <your Substrait API URL>."
-  fi
-  substrait_anon_call GET "${portal%/}/api/auth/me" -H "Authorization: Bearer $token" \
-    || die "could not reach $portal"
+  portal="$(substrait_portal_url)" \
+    || die "the account link is missing its portal URL — re-run /substrait:login --portal-url <your Substrait API URL>."
+  f="$(substrait_account_file 2>/dev/null)" || f=""
+  profile="$(_json_get "$f" profile 2>/dev/null)" || profile=""
+  SUBSTRAIT_TOKEN="$token" substrait_call GET /api/auth/me || die "could not reach $portal"
   if [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
     echo "This machine has an account token (${token:0:12}…) but $portal rejected it" \
-         "(HTTP $SUBSTRAIT_STATUS) — it may have been revoked. Run /substrait:login to re-authorize."
+         "(HTTP $SUBSTRAIT_STATUS) — it may have been revoked${profile:+, or the profile '$profile' names an org you no longer belong to}. Run /substrait:login to re-authorize."
     exit 1
   fi
   email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)"
-  echo "Authenticated to $portal as ${email:-your account} (personal token ${token:0:12}…)."
+  org="$(printf '%s' "$SUBSTRAIT_BODY" | _me_org_slug)" || org=""
+  echo "Authenticated to $portal as ${email:-your account}${org:+ in org '$org'} (personal token ${token:0:12}…${profile:+, profile '$profile'})."
   if _upload_mode_disabled; then
     if _connect_mode_disabled; then
       echo "Note: this workspace has creating new apps from Claude Code disabled" \
@@ -418,28 +790,47 @@ _unbind_project() {
 }
 
 cmd_logout() {
-  local project="" revoke="" keep=""
+  local project="" revoke="" keep="" name=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --project) project=1; shift ;;
       --revoke) revoke=1; shift ;;
       --keep-token) keep=1; shift ;;
+      --profile) name="$2"; shift 2 ;;
       *) die "unknown arg: $1" ;;
     esac
   done
   [ -n "$revoke" ] && [ -n "$keep" ] && die "--revoke and --keep-token are opposites — pass at most one"
+  _adopt_legacy_global
 
-  # Deliberately the STORED token, not _account_token: $SUBSTRAIT_TOKEN is an ambient
-  # override (CI), and logging out must not revoke a credential this machine never saved.
-  local token=""
-  token="$(_json_get "$SUBSTRAIT_GLOBAL_CONFIG" token 2>/dev/null)" || token=""
+  # Which login goes: the named profile, else the active one. Deliberately the STORED
+  # token, not _account_token: $SUBSTRAIT_TOKEN is an ambient override (CI), and logging
+  # out must not revoke a credential this machine never saved.
+  local token="" file="" active="" portal=""
+  active="$(substrait_active_profile 2>/dev/null)" || active=""
+  if [ -n "$name" ]; then
+    substrait_profile_name_ok "$name" || { die "profile name '$name' — $_PROFILE_NAME_RULE"; return 1; }
+    file="$(substrait_profile_file "$name")"
+    [ -f "$file" ] || { die "no profile named '$name' — run 'profiles' for the list."; return 1; }
+  else
+    file="$SUBSTRAIT_GLOBAL_CONFIG"; name="$active"
+  fi
+  token="$(_json_get "$file" token 2>/dev/null)" || token=""
+  portal="$(_json_get "$file" portal_url 2>/dev/null)" || portal=""
 
   # The project first — revoking its deploy token needs the account link we are about to
   # delete (and the portal URL, which the project config may be the only source of).
   [ -n "$project" ] && _unbind_project "$token"
+  # From here every call is an ACCOUNT call to THIS login's installation — the one in the
+  # file the token came from, whatever the folder is pinned to and whether or not the
+  # active profile's own file still exists (the revoke must reach the portal that minted
+  # the token).
+  export SUBSTRAIT_REQUIRE_ACCOUNT=1
+  [ -n "$portal" ] && export SUBSTRAIT_PORTAL_URL="$portal"
 
   if [ -z "$token" ]; then
-    echo "No account link on this machine — nothing to log out of."
+    local n; n="$(_profile_names | tr '\n' ' ')"
+    echo "No account link on this machine — nothing to log out of.${n:+ Saved profiles (none active): $n— 'logout --profile NAME' signs out of one.}"
     return 0
   fi
 
@@ -471,9 +862,18 @@ cmd_logout() {
          "removed, but the token stays valid until revoked on the Personal tokens page." >&2
   fi
 
-  rm -f "$SUBSTRAIT_GLOBAL_CONFIG"
+  # Drop the profile file, and the active config when this WAS the active login.
+  [ -n "$name" ] && rm -f "$(substrait_profile_file "$name")"
+  if [ -z "$name" ] || [ "$name" = "$active" ]; then rm -f "$SUBSTRAIT_GLOBAL_CONFIG"; fi
+  rmdir "$SUBSTRAIT_PROFILES_DIR" 2>/dev/null || true
   rmdir "$(dirname "$SUBSTRAIT_GLOBAL_CONFIG")" 2>/dev/null || true
-  echo "Logged out of this machine's Substrait account link."
+  if [ -n "$name" ] && [ "$name" != "$active" ]; then
+    echo "Logged out of the profile '$name'${active:+ — '$active' stays active}."
+  else
+    echo "Logged out of this machine's Substrait account link${name:+ (profile '$name')}."
+    local rest; rest="$(_profile_names | tr '\n' ' ')"
+    [ -n "$rest" ] && echo "Other saved profiles: $rest— 'use-profile NAME' activates one."
+  fi
   [ -z "$project" ] && [ -f "$SUBSTRAIT_CONFIG_FILE" ] \
     && echo "This project stays bound to $(substrait_app_slug 2>/dev/null || echo "its app")" \
             "— run 'logout --project' to unbind it too."
@@ -483,7 +883,8 @@ cmd_logout() {
 # ── Project binding on top of an account link (slug only, no secret) ────────────
 
 cmd_apps() {
-  local token; token="$(_account_token)" || die "no account link on this machine — run /substrait:login to authorize your account first."
+  _use_active_profile
+  local token; token="$(_need_account_token)" || exit 1
   # Mode awareness for the pick-or-create step (stderr, so stdout stays pure
   # slug<TAB>name rows). Checked BEFORE the projects call — both share SUBSTRAIT_BODY.
   # Fail-open: an unreachable /auth/me must not break the listing.
@@ -519,16 +920,32 @@ cmd_apps() {
 # app is dropped; MODE, when given, records the new app's mode instead. Recording nothing
 # is the safe default — substrait-deploy.sh then follows the server's state.
 _bind_project() {
-  local slug="$1" token="$2" mode="${3:-}"
-  _write_project_ref "$slug" "" reset
-  SUBSTRAIT_TOKEN="$token" substrait_call GET /api/deploy/app || exit $?
-  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not bind to '$slug' (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
+  local slug="$1" token="$2" mode="${3:-}" keep="${4:-}"
+  # The ref must be written BEFORE the verify (substrait_call reads the slug and the pin
+  # from it), so keep the previous binding and put it back if the verify fails — a folder
+  # must not come out of a failed re-link pointing at an app its profile cannot see.
+  # KEEP (a re-pin of the same app) preserves its deploy mode and environment pin.
+  local prev="" reset=reset
+  [ -n "$keep" ] && reset=""
+  [ -f "$SUBSTRAIT_CONFIG_FILE" ] && prev="$(cat "$SUBSTRAIT_CONFIG_FILE")"
+  _write_project_ref "$slug" "" $reset
+  local rc=0
+  SUBSTRAIT_TOKEN="$token" substrait_call GET /api/deploy/app || rc=$?
+  if [ "$rc" -ne 0 ] || [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
+    if [ -n "$prev" ]; then (umask 177; printf '%s\n' "$prev" > "$SUBSTRAIT_CONFIG_FILE")
+    else rm -f "$SUBSTRAIT_CONFIG_FILE"; fi
+    [ "$rc" -eq 0 ] || exit "$rc"
+    die "could not bind to '$slug' (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY — this project's previous binding is unchanged"
+    return 1
+  fi
   local host
   host="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field preview_hostname)"; host="${host:-${slug}.apps.substrait.build}"
-  _write_project_ref "$slug" "$host" reset   # re-write with the discovered host
+  _write_project_ref "$slug" "$host" $reset   # re-write with the discovered host
   [ -n "$mode" ] && _write_deploy_mode "$mode"
   substrait_write_memo ensure
-  echo "Linked this project to $slug (https://$host). Run /substrait:deploy to ship it."
+  local under=""
+  [ -n "${SUBSTRAIT_PROFILE:-}" ] && under=" under the profile '$SUBSTRAIT_PROFILE'"
+  echo "Linked this project to $slug (https://$host)$under. Run /substrait:deploy to ship it."
 }
 
 cmd_use() {
@@ -540,7 +957,8 @@ cmd_use() {
     esac
   done
   [ -n "$slug" ] || die "--app SLUG is required (see 'apps' for the list)"
-  local token; token="$(_account_token)" || die "no account link on this machine — run /substrait:login to authorize your account first."
+  _use_active_profile
+  local token; token="$(_need_account_token)" || exit 1
   _bind_project "$slug" "$token"
 }
 
@@ -566,7 +984,8 @@ cmd_create() {
     esac
   done
   [ -n "$name" ] || die "--name NAME is required"
-  local token; token="$(_account_token)" || die "no account link on this machine — run /substrait:login to authorize your account first."
+  _use_active_profile
+  local token; token="$(_need_account_token)" || exit 1
   # Escape the two JSON-special characters a display name could carry.
   local esc; esc="$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')"
   local payload="{\"display_name\":\"$esc\"}"
@@ -660,8 +1079,11 @@ cmd_modes() {
 
 cmd_repos() {
   # GitHub repos reachable through the caller's App installations, for the mode-3
-  # switch: full_name<TAB>default_branch<TAB>installation_id per row.
-  local token; token="$(_account_token)" || die "listing GitHub repos needs an account link — run /substrait:login first."
+  # switch: full_name<TAB>default_branch<TAB>installation_id per row. Under the active
+  # profile — or the one set-mode exported (the folder's pin), which _use_active_profile
+  # respects.
+  _use_active_profile
+  local token; token="$(_need_account_token "listing GitHub repos needs an account link — run /substrait:login first.")" || exit 1
   SUBSTRAIT_TOKEN="$token" substrait_call GET /api/github/repos || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not list GitHub repos (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
   local rows
@@ -702,8 +1124,14 @@ cmd_set_mode() {
   done
   case "$mode" in upload|connect) : ;; *) die "--mode must be 'upload' or 'connect'" ;; esac
   local slug; slug="$(substrait_app_slug)" || die "this project isn't linked to an app yet — run /substrait:link first."
-  # Connection management runs on /api/projects/* — account (sbt_) credential only.
-  local token; token="$(_account_token)" || die "switching deploy modes needs the account link (personal sbt_ token) — run /substrait:login. App-scoped sbd_ deploy tokens can't manage connections."
+  # Connection management runs on /api/projects/* — account (sbt_) credential only, and
+  # the folder's pinned login (the app lives there; `repos` below must list that
+  # installation's GitHub App installs).
+  local pinned
+  if [ -z "${SUBSTRAIT_PROFILE:-}" ] && pinned="$(substrait_project_profile 2>/dev/null)" && [ -n "$pinned" ]; then
+    export SUBSTRAIT_PROFILE="$pinned"
+  fi
+  local token; token="$(_need_account_token "switching deploy modes needs the account link (personal sbt_ token) — run /substrait:login. App-scoped sbd_ deploy tokens can't manage connections.")" || exit 1
   SUBSTRAIT_TOKEN="$token" substrait_call GET /api/deploy/app || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "200" ] || die "could not read the linked app (HTTP $SUBSTRAIT_STATUS): $SUBSTRAIT_BODY"
   local app_id cur_mode
@@ -775,13 +1203,33 @@ cmd_save() {
 }
 
 cmd_status() {
-  local portal token account t
+  local portal token account t active pinned org
+  _adopt_legacy_global
+  active="$(substrait_active_profile 2>/dev/null)" || active=""
+  pinned="$(substrait_project_profile 2>/dev/null)" || pinned=""
+  # The one resolver decides whether the login this folder needs is here ($SUBSTRAIT_PROFILE
+  # outranks the pin, so a CI runner forcing a present profile is fine).
+  if ! substrait_account_file >/dev/null; then
+    local want="${SUBSTRAIT_PROFILE:-$pinned}"
+    echo "This project is pinned to the profile '$want', which is not on this machine —" \
+         "sign in to it (/substrait:login) or re-link the project under another profile."
+    local n; n="$(_profile_names | tr '\n' ' ')"
+    [ -n "$n" ] && echo "Saved profiles: $n"
+    return 0
+  fi
   portal="$(substrait_portal_url 2>/dev/null)" || portal=""
   token="$(substrait_token 2>/dev/null)" || token=""
+  org="$(substrait_org 2>/dev/null)" || org=""
   if account="$(_account_token)"; then
-    echo "Account linked on this machine (personal token ${account:0:12}…, portal $portal)."
+    # The name of the file the token/portal/org above came from — a legacy folder's is
+    # the legacy profile, not the active one.
+    local which; which="$(substrait_account_profile 2>/dev/null)" || which=""
+    echo "Account linked on this machine (personal token ${account:0:12}…, portal $portal${org:+, org '$org'}${which:+, profile '$which'})."
+    [ -n "$which" ] && [ -n "$active" ] && [ "$which" != "$active" ] \
+      && echo "This project ${pinned:+is pinned to}${pinned:-follows the login it was linked under,} '$which'; the machine's active profile is '$active'."
   else
-    echo "No account link on this machine."
+    local n; n="$(_profile_names | tr '\n' ' ')"
+    echo "No account link on this machine.${n:+ Saved profiles (none active): $n— 'use-profile NAME' activates one.}"
   fi
   if [ -z "$token" ]; then
     echo "This project is not linked — run /substrait:link."
@@ -806,11 +1254,18 @@ cmd_status() {
   fi
 }
 
+# Sourced by scripts/test-plugin-profiles.sh (dev-side) to exercise the functions above
+# without running a command: `return` leaves the sourced file here.
+if [ -n "${SUBSTRAIT_LINK_NO_DISPATCH:-}" ]; then return 0 2>/dev/null; fi
+
 case "${1:-status}" in
   account)      shift; cmd_account "$@" ;;
   save-account) shift; cmd_save_account "$@" ;;
   whoami)       shift; cmd_whoami "$@" ;;
   logout)       shift; cmd_logout "$@" ;;
+  profiles)     shift; cmd_profiles "$@" ;;
+  use-profile)  shift; cmd_use_profile "$@" ;;
+  orgs)         shift; cmd_orgs "$@" ;;
   apps)         shift; cmd_apps "$@" ;;
   use)          shift; cmd_use "$@" ;;
   create)       shift; cmd_create "$@" ;;
@@ -820,5 +1275,5 @@ case "${1:-status}" in
   login)  shift; cmd_login "$@" ;;
   save)   shift; cmd_save "$@" ;;
   status) shift || true; cmd_status ;;
-  *) die "unknown command: ${1}. Use account|save-account|whoami|logout|apps|use|create|modes|repos|set-mode|login|save|status." ;;
+  *) die "unknown command: ${1}. Use account|save-account|whoami|logout|profiles|use-profile|orgs|apps|use|create|modes|repos|set-mode|login|save|status." ;;
 esac

@@ -120,7 +120,13 @@ detect_stack() {
   echo other
 }
 
-TOKEN="$(substrait_token 2>/dev/null)" || TOKEN=""
+TOKEN="$(substrait_token 2>/dev/null)" || {
+  # 3 = this folder is pinned to a login profile the machine lacks: say THAT, not "not
+  # linked" — the fix for that is a re-link under whatever is active, i.e. the silent
+  # retargeting the pin exists to prevent.
+  [ $? -eq 3 ] && { substrait_missing_profile_msg; exit 1; }
+  TOKEN=""
+}
 [ -n "$TOKEN" ] || die "not linked — run /substrait:link first."
 # An account (sbt_) token authenticates the user; the project must also name its app.
 if [ "${TOKEN#sbt_}" != "$TOKEN" ] && ! substrait_app_slug >/dev/null 2>&1; then
