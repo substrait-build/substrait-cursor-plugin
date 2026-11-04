@@ -669,9 +669,28 @@ substrait_write_memo() {
 }
 
 # substrait_open_url URL — best-effort open in the user's browser; silent if no opener.
+#
+# Windows (B-001): Claude Code and Cursor run these scripts in Git Bash (MINGW/MSYS) or
+# Cygwin, where there is no `open`/`xdg-open`. `explorer.exe URL` is NOT a browser opener
+# there: given anything it doesn't parse as a URL it opens File Explorer, and it exits 1
+# even when it worked — so "(opened in your browser)" never printed and the agent retried
+# another way. `rundll32 url.dll,FileProtocolHandler` hands the URL to the default browser
+# (what Go's and Python's webbrowser openers use); MSYS path conversion is switched off
+# for the call so the URL reaches it untouched. Only http(s) URLs are ever opened — a
+# bare path must never reach an opener that would show a folder instead.
 substrait_open_url() {
+  case "$1" in http://*|https://*) ;; *) return 1 ;; esac
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+        rundll32.exe url.dll,FileProtocolHandler "$1" >/dev/null 2>&1
+      return $? ;;
+  esac
   if command -v open >/dev/null 2>&1; then open "$1" >/dev/null 2>&1   # macOS
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1  # Linux
-  elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$1" >/dev/null 2>&1  # WSL
+  elif command -v wslview >/dev/null 2>&1; then wslview "$1" >/dev/null 2>&1  # WSL (wslu)
+  elif command -v explorer.exe >/dev/null 2>&1; then
+    # WSL without wslu: explorer.exe opens the URL but exits 1 even on success.
+    explorer.exe "$1" >/dev/null 2>&1; return 0
   else return 1; fi
 }
