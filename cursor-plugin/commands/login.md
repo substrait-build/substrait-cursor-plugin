@@ -48,6 +48,18 @@ commands read it from the profile — the URL is only needed here at login.)
    stop. Continue when they want to re-authenticate, log in to **another** installation
    or org (a new profile — nothing already saved is touched), or switch accounts.
 
+1b. **Ask the user to name this login** — always, before authorizing, unless `$ARGUMENTS`
+   already carries `--profile <name>` or the user is re-authenticating a saved profile
+   (step 1) and wants to keep its name. A profile's name is how they will refer to this
+   login from now on (`/substrait:switch`, `/substrait:logout`), and the machine may hold
+   several, so a name that says what the login IS beats the default. Ask one short
+   question, offering a suggestion they can accept as-is: the installation's host
+   (e.g. `api.example.com`), or `<org>@<host>` when they chose an org, or something of
+   their own such as `work`, `acme-prod`, `client-demo`. Rules: letters, digits, `.`,
+   `_`, `-`, `@`, starting with a letter or digit. Tell them that reusing an existing
+   profile's name REPLACES that login (step 0 shows the names in use). Pass the answer as
+   `--profile <NAME>` below.
+
 2. **Browser authorization (preferred):**
    `bash <plugin>/scripts/substrait-link.sh account --portal-url <URL> [--profile <NAME>] [--org <SLUG>]`
    This opens the Substrait portal in the user's browser, where they (already logged in
@@ -62,15 +74,14 @@ commands read it from the profile — the URL is only needed here at login.)
      script refuses an org they are not a member of and lists the ones they are in.
      `bash <plugin>/scripts/substrait-link.sh orgs` lists the active login's orgs
      (`slug`, name, `active`).
-   - `--profile <name>` names the profile; the default is the portal's host
-     (`api.substrait.build`), or `<org>@<host>` when `--org` was given. Letters, digits,
-     `.`, `_`, `-`, `@`. The new profile becomes the active one.
+   - `--profile <name>` — the name the user chose in step 1b (always pass it). The new
+     profile becomes the active one.
 
 3. **Headless / CI fallback.** If there is no browser on this machine: the user mints a
    personal token on the portal's **Personal tokens** page (account menu), then
    `bash <plugin>/scripts/substrait-link.sh save-account --token <TOKEN> --portal-url <URL> [--profile <NAME>] [--org <SLUG>]`
-   (`--portal-url` **required**). Ask **only for the token**; never echo it back in plain
-   text. The script verifies it before saving. (In CI, `SUBSTRAIT_PROFILE=<name>` in the
+   (`--portal-url` **required**). Ask for the token and, as in step 1b, the profile's name;
+   never echo the token back in plain text. The script verifies it before saving. (In CI, `SUBSTRAIT_PROFILE=<name>` in the
    environment forces a saved profile for every command, and `SUBSTRAIT_PORTAL_URL` /
    `SUBSTRAIT_TOKEN` / `SUBSTRAIT_ORG` override the files entirely.)
 
