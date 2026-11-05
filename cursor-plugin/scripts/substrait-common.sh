@@ -184,7 +184,20 @@ substrait_org() {
 # does not have (the userConfig tiers are NOT consulted then: the folder named its
 # installation, and a different one is never the right answer).
 substrait_portal_url() {
-  if [ -n "${SUBSTRAIT_PORTAL_URL:-}" ]; then printf '%s' "${SUBSTRAIT_PORTAL_URL%/}"; return 0; fi
+  local r; r="$(_substrait_portal_lookup)" || return $?
+  printf '%s' "${r##*$'\t'}"
+}
+
+# _substrait_portal_lookup — the resolution behind substrait_portal_url, printing
+# KIND<TAB>FILE<TAB>URL so a caller can also learn WHERE the URL came from:
+#   env      $SUBSTRAIT_PORTAL_URL or the userConfig env var (FILE empty)
+#   file     a JSON config: a profile file, the active config or the project config
+#   sidecar  the one-line userConfig sidecar
+# Same return codes as substrait_portal_url (1 = none set, 3 = pinned profile missing).
+# _substrait_follow_api_url uses the file to move a stored URL when the server
+# announces a new address.
+_substrait_portal_lookup() {
+  if [ -n "${SUBSTRAIT_PORTAL_URL:-}" ]; then printf 'env\t\t%s' "${SUBSTRAIT_PORTAL_URL%/}"; return 0; fi
   local v f account_first=0
   if [ "${SUBSTRAIT_REQUIRE_ACCOUNT:-}" = "1" ]; then account_first=1
   elif [ -n "${SUBSTRAIT_TOKEN:-}" ]; then case "$SUBSTRAIT_TOKEN" in sbt_*) account_first=1 ;; esac
@@ -194,25 +207,114 @@ substrait_portal_url() {
   # environment: that override is explicit, and the files are then only a hint.
   if [ "$account_first" -eq 1 ]; then
     if f="$(substrait_account_file)"; then
-      if v="$(_json_get "$f" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+      if v="$(_json_get "$f" portal_url)"; then printf 'file\t%s\t%s' "$f" "${v%/}"; return 0; fi
     elif [ -z "${SUBSTRAIT_TOKEN:-}" ]; then return 3
     fi
-    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf 'file\t%s\t%s' "$SUBSTRAIT_CONFIG_FILE" "${v%/}"; return 0; fi
   else
-    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+    if v="$(_json_get "$SUBSTRAIT_CONFIG_FILE" portal_url)"; then printf 'file\t%s\t%s' "$SUBSTRAIT_CONFIG_FILE" "${v%/}"; return 0; fi
     if f="$(substrait_account_file)"; then
-      if v="$(_json_get "$f" portal_url)"; then printf '%s' "${v%/}"; return 0; fi
+      if v="$(_json_get "$f" portal_url)"; then printf 'file\t%s\t%s' "$f" "${v%/}"; return 0; fi
     elif [ -z "${SUBSTRAIT_TOKEN:-}" ]; then return 3
     fi
   fi
   if [ -n "${CLAUDE_PLUGIN_OPTION_PORTAL_URL:-}" ]; then
-    printf '%s' "${CLAUDE_PLUGIN_OPTION_PORTAL_URL%/}"; return 0
+    printf 'env\t\t%s' "${CLAUDE_PLUGIN_OPTION_PORTAL_URL%/}"; return 0
   fi
   if [ -f "$_SUBSTRAIT_PORTAL_SIDECAR" ]; then
     v="$(head -1 "$_SUBSTRAIT_PORTAL_SIDECAR" 2>/dev/null | tr -d '[:space:]')"
-    if [ -n "$v" ]; then printf '%s' "${v%/}"; return 0; fi
+    if [ -n "$v" ]; then printf 'sidecar\t%s\t%s' "$_SUBSTRAIT_PORTAL_SIDECAR" "${v%/}"; return 0; fi
   fi
   return 1
+}
+
+# ── Following an installation to its new API address (I-268) ─────────────────────
+# The server names its canonical API URL on every response (X-Substrait-Api-Url). A
+# stored URL that differs is moved in place — same file, same profile name, every
+# folder pin intact — after a SUCCESSFUL authenticated call, never on a failure: a 401
+# from the wrong installation must not rewrite anything. The old host keeps answering
+# while the change runs, so the one command that sees the header is the last that needs
+# it. There is no redirect to follow (and none is followed).
+
+# _substrait_header_value FILE NAME — the value of response header NAME from a `curl -D`
+# dump (case-insensitive, CR stripped, first match), or exit 1. Pure bash: this runs on
+# every substrait_call, and the deploy watcher calls that every few seconds.
+_substrait_header_value() {
+  local line name="$2" v
+  shopt -s nocasematch 2>/dev/null
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" == "$name:"* ]] || continue
+    v="${line#*:}"; v="${v//$'\r'/}"
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    shopt -u nocasematch 2>/dev/null
+    [ -n "$v" ] && printf '%s' "$v"; return
+  done < "$1"
+  shopt -u nocasematch 2>/dev/null
+  return 1
+}
+
+# _substrait_api_url_ok URL — an announced address this script will store: https, a bare
+# host (a port is fine), no path. Local development may announce http://localhost.
+_substrait_api_url_ok() {
+  printf '%s' "$1" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$|^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$'
+}
+
+# _substrait_rewrite_portal_url FILE OLD NEW — replace FILE's "portal_url": "OLD" value
+# with NEW (a trailing slash on the stored value is tolerated). The file is rewritten in
+# place through `cat >`, which keeps its mode (0600) and inode. Exit 1 when FILE does not
+# carry OLD — then it is not the file we read the URL from, and it is left alone.
+_substrait_rewrite_portal_url() {
+  local f="$1" old="$2" new="$3" esc tmp
+  esc="$(printf '%s' "$old" | sed 's/[.[\*^$]/\\&/g')"
+  grep -q "\"portal_url\"[[:space:]]*:[[:space:]]*\"$esc/\{0,1\}\"" "$f" 2>/dev/null || return 1
+  tmp="$(mktemp)" || return 1
+  sed "s|\(\"portal_url\"[[:space:]]*:[[:space:]]*\)\"$esc/\{0,1\}\"|\1\"$new\"|" "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  cat "$tmp" > "$f"; rm -f "$tmp"
+}
+
+# _substrait_follow_api_url OLD NEW — act on an announced address NEW after a call to OLD
+# succeeded. Moves the stored URL (see above) and mirrors the move between a profile file
+# and the active config when they are the same login. Prints one line to stderr. Never
+# fails the caller.
+_substrait_follow_api_url() {
+  local old="${1%/}" new="${2%/}" r kind rest path cur label prof other pf
+  [ -n "$new" ] && [ "$new" != "$old" ] || return 0
+  _substrait_api_url_ok "$new" || return 0
+  r="$(_substrait_portal_lookup 2>/dev/null)" || return 0
+  kind="${r%%$'\t'*}"; rest="${r#*$'\t'}"; path="${rest%%$'\t'*}"; cur="${rest#*$'\t'}"
+  # Only the source of the URL we actually used is touched.
+  [ "$cur" = "$old" ] || return 0
+  case "$kind" in
+    env|sidecar)
+      # Not ours to rewrite: an env var or CI secret is the operator's, and the sidecar
+      # is restored from the plugin's portal URL option by the SessionStart hook at every
+      # session start — a rewrite there would be undone, and the real source never named.
+      # Said once per process (the deploy watcher calls this every few seconds).
+      [ -z "${_SUBSTRAIT_API_MOVE_NOTED:-}" ] || return 0
+      _SUBSTRAIT_API_MOVE_NOTED=1
+      if [ "$kind" = env ] && [ -n "${SUBSTRAIT_PORTAL_URL:-}" ]; then label='$SUBSTRAIT_PORTAL_URL (or the CI secret behind it)'
+      else label="the plugin's portal URL option (set when the plugin was installed)"; fi
+      echo "note: this Substrait installation's API is now $new — update $label to it. $old still answers for now." >&2
+      return 0 ;;
+    file)
+      _substrait_rewrite_portal_url "$path" "$old" "$new" || return 0
+      if prof="$(_json_get "$path" profile 2>/dev/null)" && [ -n "$prof" ]; then
+        label="your profile '$prof'"
+        # A profile file and the active config are two copies of one login.
+        pf="$(substrait_profile_file "$prof" 2>/dev/null)" || pf=""
+        for other in "$pf" "$SUBSTRAIT_GLOBAL_CONFIG"; do
+          [ -n "$other" ] && [ "$other" != "$path" ] && [ -f "$other" ] || continue
+          [ "$(_json_get "$other" profile 2>/dev/null)" = "$prof" ] || continue
+          _substrait_rewrite_portal_url "$other" "$old" "$new" || true
+        done
+      elif [ "$path" = "$SUBSTRAIT_CONFIG_FILE" ]; then label="this project's link (.substrait/config.json)"
+      else label="your saved login ($path)"
+      fi ;;
+    *) return 0 ;;
+  esac
+  _SUBSTRAIT_API_MOVE_NOTED=1
+  echo "Substrait: this installation's API moved to $new — $label now points there (was $old). Nothing else to do; the next command already uses the new address." >&2
+  return 0
 }
 
 # substrait_plugin_version — the RELEASE version of the plugin copy running this script,
@@ -348,11 +450,18 @@ _substrait_call_resolved() {
     set -- -H "X-Substrait-Plugin: $pv" "$@"
   fi
   tmp="$(mktemp)" || return 1
-  SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" \
+  local hdr; hdr="$(mktemp)" || { rm -f "$tmp"; return 1; }
+  SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -D "$hdr" -w '%{http_code}' -X "$method" \
     -H "Authorization: Bearer $token" "$base$path" "$@" 2>/dev/null)"
   local rc=$?
   SUBSTRAIT_BODY="$(cat "$tmp")"
   rm -f "$tmp"
+  # The installation announced its canonical address: follow it, but only on success —
+  # a 401/403 may well be the WRONG installation answering (I-268).
+  local announced=""
+  case "${SUBSTRAIT_STATUS:-}" in 2*) announced="$(_substrait_header_value "$hdr" x-substrait-api-url)" || announced="" ;; esac
+  rm -f "$hdr"
+  [ -z "$announced" ] || _substrait_follow_api_url "$base" "$announced"
   return $rc
 }
 
@@ -361,13 +470,22 @@ _substrait_call_resolved() {
 # (start/poll carry no token; the token is what the flow is fetching). Sets the same
 # SUBSTRAIT_BODY / SUBSTRAIT_STATUS globals as substrait_call (so don't call it inside a
 # command substitution). Returns curl's exit code.
+# Also sets SUBSTRAIT_API_URL_ANNOUNCED to the address the server announced on a 2xx
+# (X-Substrait-Api-Url; empty otherwise), so a login saves the installation's CURRENT
+# address rather than the one the person typed (I-268).
 substrait_anon_call() {
   local method="$1" url="$2"; shift 2
   local tmp; tmp="$(mktemp)" || return 1
-  SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" "$@" 2>/dev/null)"
+  local hdr; hdr="$(mktemp)" || { rm -f "$tmp"; return 1; }
+  SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -D "$hdr" -w '%{http_code}' -X "$method" "$url" "$@" 2>/dev/null)"
   local rc=$?
   SUBSTRAIT_BODY="$(cat "$tmp")"
   rm -f "$tmp"
+  SUBSTRAIT_API_URL_ANNOUNCED=""
+  case "${SUBSTRAIT_STATUS:-}" in
+    2*) SUBSTRAIT_API_URL_ANNOUNCED="$(_substrait_header_value "$hdr" x-substrait-api-url)" || SUBSTRAIT_API_URL_ANNOUNCED="" ;;
+  esac
+  rm -f "$hdr"
   return $rc
 }
 

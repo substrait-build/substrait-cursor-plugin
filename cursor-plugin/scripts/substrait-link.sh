@@ -416,6 +416,20 @@ _save_login() {
   _adopt_legacy_global
   _verify_account "$portal" "$token" "$org" || return 1
   email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)" || email=""
+  # The installation may answer under a newer address than the one typed (I-268): save
+  # THAT, so every later call already uses it. The default profile name follows the
+  # address — unless this machine already holds the profile named after the TYPED host:
+  # then this login REPLACES it (same name, retiring its token below) rather than leaving
+  # a twin on the old address with a live token.
+  if [ -n "${SUBSTRAIT_API_URL_ANNOUNCED:-}" ] && [ "${SUBSTRAIT_API_URL_ANNOUNCED%/}" != "${portal%/}" ] \
+     && _substrait_api_url_ok "${SUBSTRAIT_API_URL_ANNOUNCED%/}"; then
+    if [ -z "$profile" ]; then
+      local typed; typed="$(_portal_host "$portal")"; [ -n "$org" ] && typed="$org@$typed"
+      f="$(substrait_profile_file "$typed" 2>/dev/null)" && [ -f "$f" ] && profile="$typed"
+    fi
+    echo "note: $portal answers as ${SUBSTRAIT_API_URL_ANNOUNCED%/} — saving the login under that address${profile:+ (profile '$profile')}." >&2
+    portal="${SUBSTRAIT_API_URL_ANNOUNCED%/}"
+  fi
   # Default name: the portal's host — `ORG@host` when the org was chosen explicitly, so a
   # second org on the same installation does not overwrite the first login.
   if [ -z "$profile" ]; then
