@@ -462,6 +462,14 @@ _substrait_call_resolved() {
   case "${SUBSTRAIT_STATUS:-}" in 2*) announced="$(_substrait_header_value "$hdr" x-substrait-api-url)" || announced="" ;; esac
   rm -f "$hdr"
   [ -z "$announced" ] || _substrait_follow_api_url "$base" "$announced"
+  # 426 Upgrade Required: this plugin release is below the installation's minimum. The
+  # server's detail says exactly what to run; say it once per process, before whatever
+  # the caller prints about its own failed request.
+  if [ "${SUBSTRAIT_STATUS:-}" = "426" ] && [ -z "${_SUBSTRAIT_UPGRADE_NOTED:-}" ]; then
+    _SUBSTRAIT_UPGRADE_NOTED=1
+    local why; why="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field detail)" || why="this plugin release is below the minimum the installation accepts"
+    echo "Substrait: UPDATE REQUIRED — $why" >&2
+  fi
   return $rc
 }
 
