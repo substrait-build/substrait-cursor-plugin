@@ -21,6 +21,9 @@
 #   orgs                                    the orgs the active login belongs to
 #   whoami                                  verify the account link against the portal
 #                                           and print who it authenticates (and where)
+#   ping                                    plugin release + one read per saved login
+#                                           (and this folder's own link); each success
+#                                           moves a stored address the server has moved
 #   logout [--profile NAME] [--project] [--revoke|--keep-token]
 #                                           undo `account` for the active profile (or
 #                                           NAME): revoke the personal token on the portal
@@ -1268,6 +1271,60 @@ cmd_status() {
   fi
 }
 
+# cmd_ping — /substrait:ping: the plugin's release, then ONE signed-in read per saved
+# login (GET /api/auth/me under each profile) and, in a folder linked by an app deploy
+# token, one for that link (GET /api/deploy/app). Read-only on the server. Each successful
+# call goes through substrait_call, so a stored address the installation has moved away
+# from is rewritten in place there (I-268, _substrait_follow_api_url) — ping is the
+# command to tell people to run after an address change. A failure is reported, never
+# fatal: one stale login must not hide the others.
+cmd_ping() {
+  _adopt_legacy_global
+  local pv names name f portal email org line any=0
+  pv="$(substrait_plugin_version 2>/dev/null)" || pv="unknown"
+  echo "Substrait plugin is alive — release version $pv."
+  names="$(_profile_names)"
+  for name in $names; do
+    any=1
+    f="$(substrait_profile_file "$name" 2>/dev/null)" || continue
+    # A subshell per profile: substrait_call's per-process state (the resolved account
+    # file, the once-only notes) must not leak from one login into the next.
+    line="$(
+      export SUBSTRAIT_PROFILE="$name" SUBSTRAIT_REQUIRE_ACCOUNT=1
+      unset SUBSTRAIT_TOKEN
+      portal="$(substrait_portal_url 2>/dev/null)" || { echo "profile '$name': no portal URL saved — run /substrait:login again."; exit 0; }
+      if ! substrait_call GET /api/auth/me; then
+        echo "profile '$name': could not reach $portal."; exit 0
+      fi
+      if [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
+        echo "profile '$name': $portal answered HTTP ${SUBSTRAIT_STATUS:-?} — this login no longer works there; run /substrait:login to sign in again."; exit 0
+      fi
+      email="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field email)"
+      org="$(printf '%s' "$SUBSTRAIT_BODY" | _me_org_slug)" || org=""
+      portal="$(substrait_portal_url 2>/dev/null)" || true  # re-read: the call may have moved it
+      echo "profile '$name': OK — $portal as ${email:-your account}${org:+ in org '$org'}."
+    )"
+    echo "$line"
+  done
+  # A folder linked with its own app deploy token keeps its own portal URL.
+  if _json_get "$SUBSTRAIT_CONFIG_FILE" token >/dev/null 2>&1; then
+    any=1
+    line="$(
+      unset SUBSTRAIT_PROFILE SUBSTRAIT_REQUIRE_ACCOUNT SUBSTRAIT_TOKEN
+      portal="$(substrait_portal_url 2>/dev/null)" || { echo "this folder's link: no portal URL saved — run /substrait:link again."; exit 0; }
+      if ! substrait_call GET /api/deploy/app; then echo "this folder's link: could not reach $portal."; exit 0; fi
+      if [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
+        echo "this folder's link: $portal answered HTTP ${SUBSTRAIT_STATUS:-?} — run /substrait:link again."; exit 0
+      fi
+      portal="$(substrait_portal_url 2>/dev/null)" || true
+      echo "this folder's link: OK — $portal ($(printf '%s' "$SUBSTRAIT_BODY" | _json_field slug))."
+    )"
+    echo "$line"
+  fi
+  [ "$any" -eq 1 ] || echo "No saved logins on this machine — run /substrait:login to sign in."
+  return 0
+}
+
 # Sourced by scripts/test-plugin-profiles.sh (dev-side) to exercise the functions above
 # without running a command: `return` leaves the sourced file here.
 if [ -n "${SUBSTRAIT_LINK_NO_DISPATCH:-}" ]; then return 0 2>/dev/null; fi
@@ -1276,6 +1333,7 @@ case "${1:-status}" in
   account)      shift; cmd_account "$@" ;;
   save-account) shift; cmd_save_account "$@" ;;
   whoami)       shift; cmd_whoami "$@" ;;
+  ping)         shift; cmd_ping "$@" ;;
   logout)       shift; cmd_logout "$@" ;;
   profiles)     shift; cmd_profiles "$@" ;;
   use-profile)  shift; cmd_use_profile "$@" ;;
@@ -1289,5 +1347,5 @@ case "${1:-status}" in
   login)  shift; cmd_login "$@" ;;
   save)   shift; cmd_save "$@" ;;
   status) shift || true; cmd_status ;;
-  *) die "unknown command: ${1}. Use account|save-account|whoami|logout|profiles|use-profile|orgs|apps|use|create|modes|repos|set-mode|login|save|status." ;;
+  *) die "unknown command: ${1}. Use account|save-account|whoami|ping|logout|profiles|use-profile|orgs|apps|use|create|modes|repos|set-mode|login|save|status." ;;
 esac
