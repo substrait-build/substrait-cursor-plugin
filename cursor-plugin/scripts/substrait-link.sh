@@ -71,7 +71,7 @@ die() { echo "Error: $*" >&2; exit 1; }
 # $SUBSTRAIT_PORTAL_URL (multi-tenant safety: a default would silently target the wrong
 # installation). Kept as a constant so the four flows share one wording. Callers use it
 # INLINE (not in a $() subshell) so die() actually exits the script.
-_PORTAL_REQUIRED_MSG="a portal URL is required — pass --portal-url <your Substrait API URL> (e.g. https://api.substrait.build for the hosted platform, or your tenant/demo URL such as https://api.demo.substrait.build). There is no default."
+_PORTAL_REQUIRED_MSG="a portal URL is required — pass --portal-url <your Substrait API URL> (e.g. https://api.pluto.substrait.build for the Substrait cloud, or your installation's own API address such as https://api.<installation>.substrait.build). There is no default."
 
 # _write_config PORTAL TOKEN [SLUG] [HOST] — write .substrait/config.json (0600) and
 # make sure .substrait/ is gitignored. SLUG/HOST are cached for friendlier messages.
