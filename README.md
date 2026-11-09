@@ -25,6 +25,9 @@ editor. The plugin bundles:
     (secrets are write-only; changes live-apply to a running app).
   - **`/substrait:library`** — browse the platform's API Library and design an app against
     existing APIs.
+  - **`/substrait:slate`** — create, change, pull and push back **slates** (AI-made
+    documents, decks and interactive pages): ask for one from a brief, ask it to change,
+    fetch its HTML to edit by hand, save it back as the next version, open it.
 
 ## Install
 

@@ -72,6 +72,42 @@ _json_field() {
 # _json_get FILE KEY -> prints the value, or exits 1 if the file or key is absent.
 _json_get() { [ -f "$1" ] || return 1; _json_field "$2" < "$1"; }
 
+# substrait_json_str TEXT — TEXT as a JSON string literal, quotes included. Pure awk
+# (present wherever bash is, Git Bash included — unlike python3 or jq): backslash, quote,
+# tab, CR, newline and form feed escaped, every other C0 control as \u00XX — so a saved
+# page is byte for byte the file (NUL excepted: awk cannot carry it). The ONE escaper for
+# every request body the scripts build (the library's and the slates' prompts, a saved page).
+substrait_json_str() {
+  printf '%s' "$1" | _substrait_json_escape_awk
+}
+
+# substrait_json_file_str FILE — FILE's content as a JSON string literal (same rules),
+# streamed to stdout so a multi-megabyte page never sits in a shell variable. The literal
+# ends with \n exactly when FILE does (awk alone cannot tell): `get` writes the body as
+# it came, so a `get` → `put` of an unchanged file is byte for byte the head's document —
+# which the server answers with the head's number and no new version (services/slates.save).
+substrait_json_file_str() {
+  local trail=0
+  if [ -s "$1" ] && [ -z "$(tail -c 1 "$1")" ]; then trail=1; fi
+  _substrait_json_escape_awk "$trail" < "$1"
+}
+
+# _substrait_json_escape_awk [TRAIL] — the escaper. Replacement strings are written so
+# that gawk (Git Bash, most Linux) and mawk/BSD awk agree: `&&` doubles a backslash (POSIX
+# reads a literal `\\` in the replacement as ONE backslash, so "\\\\" would not), and
+# `\\&` puts a backslash before the matched quote. TRAIL=1 ends the string with \n.
+_substrait_json_escape_awk() {
+  awk -v trail="${1:-0}" 'BEGIN { ORS = ""; printf "\"" }
+    { gsub(/\\/, "&&"); gsub(/"/, "\\\\&"); gsub(/\t/, "\\t"); gsub(/\r/, "\\r"); gsub(/\f/, "\\f");
+      for (c = 1; c <= 31; c++) {
+        if (c == 9 || c == 10 || c == 12 || c == 13) continue;
+        ch = sprintf("%c", c);
+        if (index($0, ch)) gsub(ch, sprintf("\\u%04x", c));
+      }
+      if (NR > 1) printf "\\n"; printf "%s", $0 }
+    END { if (trail == 1 && NR > 0) printf "\\n"; printf "\"" }'
+}
+
 # ── Profiles ────────────────────────────────────────────────────────────────────
 # substrait_profile_name_ok NAME — a profile name is a file name: letters, digits and
 # `.`/`_`/`-`/`@` only, starting with a letter or digit. `@` so the default name of a login
@@ -454,7 +490,17 @@ _substrait_call_resolved() {
   SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -D "$hdr" -w '%{http_code}' -X "$method" \
     -H "Authorization: Bearer $token" "$base$path" "$@" 2>/dev/null)"
   local rc=$?
-  SUBSTRAIT_BODY="$(cat "$tmp")"
+  # SUBSTRAIT_BODY_TO=FILE (set by the caller for THIS call) keeps the body byte for byte
+  # in FILE: a shell variable strips trailing newlines and NULs, which is fine for JSON
+  # and wrong for a document that must round-trip (a slate's HTML). A 2xx body is then
+  # NOT copied into SUBSTRAIT_BODY — it may be megabytes the caller reads from the file;
+  # an error body still is, so the caller can say what went wrong.
+  if [ -z "${SUBSTRAIT_BODY_TO:-}" ]; then
+    SUBSTRAIT_BODY="$(cat "$tmp")"
+  else
+    case "${SUBSTRAIT_STATUS:-}" in 2*) SUBSTRAIT_BODY="" ;; *) SUBSTRAIT_BODY="$(cat "$tmp")" ;; esac
+    mv -f "$tmp" "$SUBSTRAIT_BODY_TO" 2>/dev/null || cp -f "$tmp" "$SUBSTRAIT_BODY_TO"
+  fi
   rm -f "$tmp"
   # The installation announced its canonical address: follow it, but only on success —
   # a 401/403 may well be the WRONG installation answering (I-268).
@@ -487,7 +533,17 @@ substrait_anon_call() {
   local hdr; hdr="$(mktemp)" || { rm -f "$tmp"; return 1; }
   SUBSTRAIT_STATUS="$(curl -sS -o "$tmp" -D "$hdr" -w '%{http_code}' -X "$method" "$url" "$@" 2>/dev/null)"
   local rc=$?
-  SUBSTRAIT_BODY="$(cat "$tmp")"
+  # SUBSTRAIT_BODY_TO=FILE (set by the caller for THIS call) keeps the body byte for byte
+  # in FILE: a shell variable strips trailing newlines and NULs, which is fine for JSON
+  # and wrong for a document that must round-trip (a slate's HTML). A 2xx body is then
+  # NOT copied into SUBSTRAIT_BODY — it may be megabytes the caller reads from the file;
+  # an error body still is, so the caller can say what went wrong.
+  if [ -z "${SUBSTRAIT_BODY_TO:-}" ]; then
+    SUBSTRAIT_BODY="$(cat "$tmp")"
+  else
+    case "${SUBSTRAIT_STATUS:-}" in 2*) SUBSTRAIT_BODY="" ;; *) SUBSTRAIT_BODY="$(cat "$tmp")" ;; esac
+    mv -f "$tmp" "$SUBSTRAIT_BODY_TO" 2>/dev/null || cp -f "$tmp" "$SUBSTRAIT_BODY_TO"
+  fi
   rm -f "$tmp"
   SUBSTRAIT_API_URL_ANNOUNCED=""
   case "${SUBSTRAIT_STATUS:-}" in

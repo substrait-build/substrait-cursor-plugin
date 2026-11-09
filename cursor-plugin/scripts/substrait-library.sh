@@ -144,18 +144,8 @@ cmd_spec() {
 # _json_str — a JSON string literal from a shell value. Escapes backslash, quote, tab,
 # CR and newline; enough for a reason, a path or a media type. Line-by-line so it stays
 # within what BSD sed (macOS) and GNU sed both do — no \r escapes, no label loops.
-_json_str() {
-  local out="" line first=1 tab cr
-  tab="$(printf '\t')"; cr="$(printf '\r')"
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
-      -e "s/$tab/\\\\t/g" -e "s/$cr/\\\\r/g")"
-    if [ $first -eq 1 ]; then out="$line"; first=0; else out="$out\\n$line"; fi
-  done <<EOF
-$1
-EOF
-  printf '"%s"' "$out"
-}
+# JSON string literals come from substrait-common.sh: one escaper for every script.
+_json_str() { substrait_json_str "$1"; }
 
 # _detail — the portal's {detail} out of an error body, or the body itself.
 _detail() { printf '%s' "$1" | _json_field detail 2>/dev/null || printf '%s' "$1"; }
