@@ -28,6 +28,8 @@ editor. The plugin bundles:
   - **`/substrait:slate`** — create, change, pull and push back **slates** (AI-made
     documents, decks and interactive pages): ask for one from a brief, ask it to change,
     fetch its HTML to edit by hand, save it back as the next version, open it.
+    The page is written by Substrait's AI (on your organisation's AI key) or right here by
+    Cursor (on your own usage) — say which, or set the default with `mode`.
 
 ## Install
 

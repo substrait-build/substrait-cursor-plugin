@@ -502,6 +502,13 @@ _substrait_call_resolved() {
     mv -f "$tmp" "$SUBSTRAIT_BODY_TO" 2>/dev/null || cp -f "$tmp" "$SUBSTRAIT_BODY_TO"
   fi
   rm -f "$tmp"
+  # SUBSTRAIT_HEADER_WANT=name (set by the caller for THIS call) → that response header's
+  # value in SUBSTRAIT_HEADER ("" when absent): a slate's `get` learns which version the
+  # bytes it was sent are (X-Slate-Version), which no body of a raw document can say.
+  SUBSTRAIT_HEADER=""
+  if [ -n "${SUBSTRAIT_HEADER_WANT:-}" ]; then
+    SUBSTRAIT_HEADER="$(_substrait_header_value "$hdr" "$SUBSTRAIT_HEADER_WANT")" || SUBSTRAIT_HEADER=""
+  fi
   # The installation announced its canonical address: follow it, but only on success —
   # a 401/403 may well be the WRONG installation answering (I-268).
   local announced=""
