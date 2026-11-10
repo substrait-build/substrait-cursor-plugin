@@ -8,9 +8,16 @@
 #                                      a new slate from one request; the first version is
 #                                      written by the AI in the background (--wait follows
 #                                      it to the end and prints the result)
+#   new --kind doc|deck|page --from FILE [--title T]
+#                                      a new slate from an HTML document you already have:
+#                                      FILE is version 1 as it is, no AI turn runs (the
+#                                      title is FILE's <title> unless --title says)
 #   show ID                            one slate (JSON: title, kind, head_version, url,
 #                                      the turn running on it)
-#   ask ID [--wait] REQUEST...         ask the AI to change the slate (202; --wait follows)
+#   ask ID [--attach FILE] [--wait] REQUEST...
+#                                      ask the AI to change the slate (202; --wait follows);
+#                                      --attach sends FILE with the request — "insert these
+#                                      slides" with the slides' HTML, notes to write from
 #   history ID                         what was asked, newest first (JSON)
 #   versions ID                        the versions (JSON)
 #   get ID [--version N] [--out FILE]  the page's HTML — the head, or version N — to
@@ -128,11 +135,12 @@ cmd_versions() {
 }
 
 cmd_new() {
-  local kind="" title="" wait=0 prompt=""
+  local kind="" title="" wait=0 prompt="" from=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind)  _need_value $# --kind; kind="$2"; shift 2 ;;
       --title) _need_value $# --title; title="$2"; shift 2 ;;
+      --from)  _need_value $# --from; from="$2"; shift 2 ;;
       --wait)  wait=1; shift ;;
       --)      shift; prompt="$*"; break ;;
       -*)      die "unknown option: $1" ;;
@@ -144,6 +152,10 @@ cmd_new() {
     "") die "say what kind: --kind doc (a document), deck (slides) or page (an interactive tool)" ;;
     *)  die "--kind must be doc, deck or page" ;;
   esac
+  if [ -n "$from" ]; then
+    _import "$kind" "$title" "$from" "$prompt" "$wait"
+    return
+  fi
   [ -n "$prompt" ] || die "say what the slate should be: new --kind $kind \"<your request>\""
   local body
   body="{\"kind\":\"$kind\",\"prompt\":$(substrait_json_str "$prompt")"
@@ -162,21 +174,70 @@ cmd_new() {
   fi
 }
 
+# `new --from FILE`: the document is version 1 as it is — no request, no AI turn, nothing
+# against the org's daily cap. A request alongside it is refused rather than silently
+# dropped (ask for the change afterwards: `ask ID "..."`); --wait has nothing to follow.
+_import() {
+  local kind="$1" title="$2" file="$3" prompt="$4" wait="$5"
+  [ -z "$prompt" ] || die "--from imports FILE as it is; ask for changes afterwards: ask ID \"<request>\""
+  [ "$wait" = 1 ] && die "--wait follows an AI turn; --from runs none (the slate is ready at once)"
+  [ -f "$file" ] || die "--from FILE: $file must exist"
+  _check_html_file "$file"
+  local body
+  body="$(mktemp)" || exit 1
+  {
+    printf '{"kind":"%s"' "$kind"
+    [ -n "$title" ] && printf ',"title":%s' "$(substrait_json_str "$title")"
+    printf ',"html":'
+    substrait_json_file_str "$file"
+    printf '}'
+  } > "$body"
+  substrait_call POST "/api/slates/import" -H "Content-Type: application/json" \
+    --data-binary "@$body" || { rm -f "$body"; exit 1; }
+  rm -f "$body"
+  [ "${SUBSTRAIT_STATUS:-}" = "201" ] || _fail "Importing $file"
+  local sid url
+  sid="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field id)" || sid=""
+  url="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field url)" || url=""
+  printf '%s\n' "$SUBSTRAIT_BODY"
+  echo "Imported $file as slate $sid ($kind), version 1.${url:+ Open it: $url}" >&2
+}
+
 cmd_ask() {
   local sid="${1:-}"; shift || true
-  _need_id "$sid" "ask ID [--wait] REQUEST..."
-  local wait=0 prompt=""
+  _need_id "$sid" "ask ID [--attach FILE] [--wait] REQUEST..."
+  local wait=0 prompt="" attach=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --wait) wait=1; shift ;;
-      --)     shift; prompt="$*"; break ;;
-      -*)     die "unknown option: $1" ;;
-      *)      prompt="${prompt:+$prompt }$1"; shift ;;
+      --wait)   wait=1; shift ;;
+      --attach) _need_value $# --attach; attach="$2"; shift 2 ;;
+      --)       shift; prompt="$*"; break ;;
+      -*)       die "unknown option: $1" ;;
+      *)        prompt="${prompt:+$prompt }$1"; shift ;;
     esac
   done
   [ -n "$prompt" ] || die "say what should change: ask $sid \"<your request>\""
-  substrait_call POST "/api/slates/$sid/turns" -H "Content-Type: application/json" \
-    -d "{\"prompt\":$(substrait_json_str "$prompt")}" || exit $?
+  if [ -n "$attach" ]; then
+    # The file goes with the request as the model's material (any text; an HTML deck's
+    # slides, notes) — not as the page: `put` is for that. Streamed to a temp file like
+    # `put`'s body, so a multi-megabyte file never sits in a shell variable.
+    [ -f "$attach" ] || die "--attach FILE: $attach must exist"
+    [ -s "$attach" ] || die "--attach FILE: $attach is empty"
+    local body
+    body="$(mktemp)" || exit 1
+    {
+      printf '{"prompt":%s,"attachment":{"name":%s,"text":' \
+        "$(substrait_json_str "$prompt")" "$(substrait_json_str "$(basename "$attach")")"
+      substrait_json_file_str "$attach"
+      printf '}}'
+    } > "$body"
+    substrait_call POST "/api/slates/$sid/turns" -H "Content-Type: application/json" \
+      --data-binary "@$body" || { rm -f "$body"; exit 1; }
+    rm -f "$body"
+  else
+    substrait_call POST "/api/slates/$sid/turns" -H "Content-Type: application/json" \
+      -d "{\"prompt\":$(substrait_json_str "$prompt")}" || exit $?
+  fi
   [ "${SUBSTRAIT_STATUS:-}" = "202" ] || _fail "Asking slate $sid"
   local tid
   tid="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field id)" || tid=""
@@ -221,6 +282,17 @@ cmd_get() {
   fi
 }
 
+# The server's rule (`slates._DOCTYPE`: ^\s*<!doctype\s+html, case-insensitive), so a
+# file is refused here exactly when it would be there — before a multi-MB upload, and
+# never for a document the server takes: line breaks are whitespace to it (a newline
+# after DOCTYPE, blank lines before it), so they become spaces here rather than vanish;
+# the first 4 KB is read, not 64 bytes, for a document that opens with a comment-free
+# stretch of whitespace. A BOM fails both. Shared by `put` and `new --from`.
+_check_html_file() {
+  LC_ALL=C head -c 4096 "$1" | tr '\r\n' '  ' | grep -Eqi '^[[:space:]]*<!doctype[[:space:]]+html' \
+    || die "$1 must be one complete HTML document beginning with <!DOCTYPE html>"
+}
+
 cmd_put() {
   local sid="${1:-}" file="${2:-}"; shift 2 2>/dev/null || true
   _need_id "$sid" "put ID FILE [--base N]"
@@ -238,14 +310,7 @@ cmd_put() {
     base="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field head_version)" || die "could not read the slate's head version"
   fi
   _is_int "$base" || die "--base takes a number"
-  # The server's rule (`slates._DOCTYPE`: ^\s*<!doctype\s+html, case-insensitive), so a
-  # file is refused here exactly when it would be there — before a multi-MB upload, and
-  # never for a document the server takes: line breaks are whitespace to it (a newline
-  # after DOCTYPE, blank lines before it), so they become spaces here rather than vanish;
-  # the first 4 KB is read, not 64 bytes, for a document that opens with a comment-free
-  # stretch of whitespace. A BOM fails both.
-  LC_ALL=C head -c 4096 "$file" | tr '\r\n' '  ' | grep -Eqi '^[[:space:]]*<!doctype[[:space:]]+html' \
-    || die "$file must be one complete HTML document beginning with <!DOCTYPE html>"
+  _check_html_file "$file"
   local body
   body="$(mktemp)" || exit 1
   {

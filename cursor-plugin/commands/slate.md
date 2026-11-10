@@ -32,9 +32,20 @@ Work out what the user wants, then:
    in it — the AI writes the first version from it alone. Add `--wait` when the user
    wants to see the result now: the script follows the turn (typically 30–90 s) and
    prints the final version number. Tell the user the `url` so they can open it.
+   **From a file the user already has** (a deck exported by another tool, an HTML page
+   in the project): `… new --kind doc|deck|page --from FILE [--title "…"]` makes it
+   version 1 as it is — no request, no AI turn, ready at once. FILE must be ONE complete
+   HTML document starting with `<!DOCTYPE html>` with everything inline or from the CDNs
+   the viewer allows (as in step 4; linked local images or stylesheets will not load).
+   The title is FILE's `<title>` unless `--title` says. Changes come afterwards, with
+   `ask`.
 
 3. **Change one.** `… ask ID [--wait] "what should change"`. A turn is queued behind any
-   turn already running on that slate; `--wait` follows it. The AI edits in place for a
+   turn already running on that slate; `--wait` follows it. **With a file:**
+   `… ask ID --attach FILE "insert these slides after the agenda"` sends FILE with the
+   request as material for the AI — the HTML of slides to bring into a deck, notes or a
+   spec to write a section from, any text. The AI renders what it says in the slate's own
+   style; it is not `put` (which replaces the page with the file as it is). The AI edits in place for a
    small change and rewrites the page for a large one — either way the result is a new
    version and the old ones stay (see `… versions ID`; `… history ID` is what was asked).
 
