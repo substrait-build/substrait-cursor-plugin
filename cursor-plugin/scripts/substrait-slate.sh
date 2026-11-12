@@ -29,6 +29,14 @@
 #                                      ask the AI to change the slate (202; --wait follows);
 #                                      --attach sends FILE with the request — "insert these
 #                                      slides" with the slides' HTML, notes to write from
+#   question ID [--new] QUESTION...    ask the AI ABOUT the slate — what it says, what a
+#                                      figure means, what is missing. The page does NOT
+#                                      change (that is `ask`). Waits for the answer and
+#                                      prints it (JSON: `answer` is Markdown). View access
+#                                      is enough; the questions are yours alone. --new
+#                                      starts a new conversation first (earlier questions
+#                                      are no longer read as context)
+#   questions ID                       my questions on the slate and their answers (JSON)
 #   history ID                         what was asked, newest first (JSON)
 #   versions ID                        the versions (JSON)
 #   get ID [--version N] [--out FILE]  the page's HTML — the head, or version N — to
@@ -53,8 +61,9 @@
 #   kv ID delete KEY                   remove one key
 #
 # Output is the API's JSON body untouched (the calling agent parses JSON natively; the
-# pure-shell _json_field helper can't walk arrays), except `get` (the document) and the
-# --wait follow-up (one status line per poll on stderr, the final turn as JSON).
+# pure-shell _json_field helper can't walk arrays), except `get` (the document), the
+# --wait follow-up (one status line per poll on stderr, the final turn as JSON) and
+# `question` (the same: status lines on stderr, the answered question as JSON).
 #
 # Needs an ACCOUNT credential (personal access token, sbt_): slates belong to a person in
 # an org, so an app-scoped deploy token (sbd_) is refused by the server. The profile's
@@ -331,6 +340,62 @@ cmd_ask() {
   fi
 }
 
+# Questions ABOUT a slate: the platform's AI reads the page and answers; the page does not
+# change, nothing joins the slate's history, and a person's questions are theirs alone.
+# The platform answers them only for an organisation whose slates are written on the
+# platform — in an `editor` organisation the server refuses (403) and says to ask here.
+cmd_question() {
+  local sid="${1:-}"; shift || true
+  _need_id "$sid" "question ID [--new] QUESTION..."
+  local fresh=0 text=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --new) fresh=1; shift ;;
+      --)    shift; text="$*"; break ;;
+      -*)    die "unknown option: $1" ;;
+      *)     text="${text:+$text }$1"; shift ;;
+    esac
+  done
+  [ -n "$text" ] || die "say what you want to know: question $sid \"<your question>\""
+  if [ "$fresh" = 1 ]; then
+    substrait_call DELETE "/api/slates/$sid/questions" || exit $?
+    [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Starting a new conversation on slate $sid"
+  fi
+  substrait_call POST "/api/slates/$sid/questions" -H "Content-Type: application/json" \
+    -d "{\"question\":$(substrait_json_str "$text")}" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "202" ] || _fail "Asking about slate $sid"
+  local qid status last=""
+  qid="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field id)" || die "unexpected answer from the platform: $SUBSTRAIT_BODY"
+  while :; do
+    substrait_call GET "/api/slates/$sid/questions/$qid" || exit $?
+    [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the answer to question $qid"
+    status="$(printf '%s' "$SUBSTRAIT_BODY" | _json_field status)" || status="?"
+    case "$status" in
+      done)
+        printf '%s\n' "$SUBSTRAIT_BODY"
+        echo "Answered from slate $sid as it is now — the page was not changed." >&2
+        return 0 ;;
+      failed)
+        printf '%s\n' "$SUBSTRAIT_BODY"
+        echo "The question was not answered — $(printf '%s' "$SUBSTRAIT_BODY" | _json_field error || echo 'see the body above')" >&2
+        return 2 ;;
+      *)
+        if [ "$status" != "$last" ]; then
+          echo "Question $qid: $status…" >&2
+          last="$status"
+        fi
+        sleep "$POLL_S" ;;
+    esac
+  done
+}
+
+cmd_questions() {
+  _need_id "${1:-}" "questions ID"
+  substrait_call GET "/api/slates/$1/questions" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading your questions on slate $1"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
 cmd_get() {
   local sid="${1:-}"; shift || true
   _need_id "$sid" "get ID [--version N] [--out FILE]"
@@ -484,6 +549,8 @@ case "${1:-}" in
   new)      shift; cmd_new "$@" ;;
   show)     shift; cmd_show "$@" ;;
   ask)      shift; cmd_ask "$@" ;;
+  question) shift; cmd_question "$@" ;;
+  questions) shift; cmd_questions "$@" ;;
   history)  shift; cmd_history "$@" ;;
   versions) shift; cmd_versions "$@" ;;
   get)      shift; cmd_get "$@" ;;
