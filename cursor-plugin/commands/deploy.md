@@ -167,7 +167,9 @@ bypassing the check.
 An app has at most two **deploy environments**: `dev` and `production`, each with its own
 namespace, database, URL, variables and access settings. `production` is the app's own
 URL (`<slug>.<org>.apps.substrait.build`); `dev` is `<slug>--dev.<org>.apps.substrait.build`
-and always sits behind sign-in for the organisation — it can never be made public.
+and sits behind sign-in for the organisation. Most organisations make that mandatory;
+where the admin has not, the app's Sharing tab can turn it off, so check there before
+putting anything sensitive on `dev`.
 
 - **New apps start in `dev`.** Their first deploys land there, and there is no
   production until the app **goes live**. Apps created before that keep production as

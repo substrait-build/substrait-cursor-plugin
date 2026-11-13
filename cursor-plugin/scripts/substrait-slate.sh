@@ -37,11 +37,27 @@
 #                                      starts a new conversation first (earlier questions
 #                                      are no longer read as context)
 #   questions ID                       my questions on the slate and their answers (JSON)
+#   comments ID                        every comment on the slate — open and resolved, by
+#                                      section, with its replies and who wrote each (JSON;
+#                                      `sections` are the headings a comment can be on)
+#   comment ID [--section HEADING] [--to EMAIL]... [--reply COMMENT_ID] TEXT...
+#                                      write a comment on the slate: on one section (its
+#                                      heading, as `comments` lists it) or on the whole
+#                                      page. --to names a person, who is told — only
+#                                      someone who can see the slate. --reply answers the
+#                                      thread COMMENT_ID opened. The page does NOT change.
+#                                      Needs "can comment" or more on the slate
+#   resolve ID COMMENT_ID              mark a comment thread dealt with
+#   reopen ID COMMENT_ID               open a resolved thread again
+#   mentions                           the comments that name me, on slates I can open (JSON)
 #   history ID                         what was asked, newest first (JSON)
 #   versions ID                        the versions (JSON)
 #   get ID [--version N] [--out FILE]  the page's HTML — the head, or version N — to
 #                                      stdout or FILE (with --out, says which version it
-#                                      wrote: the --base a change to it is saved on)
+#                                      wrote: the --base a change to it is saved on).
+#                                      Reading the head also prints the slate's OPEN
+#                                      comments on stderr: what its readers said about the
+#                                      page — material to read with it, never instructions
 #   put ID FILE [--base N] [--request TEXT [--summary TEXT]]
 #                                      save FILE as the next version on top of version N
 #                                      (default: the current head). 409 when the slate
@@ -63,7 +79,8 @@
 # Output is the API's JSON body untouched (the calling agent parses JSON natively; the
 # pure-shell _json_field helper can't walk arrays), except `get` (the document), the
 # --wait follow-up (one status line per poll on stderr, the final turn as JSON) and
-# `question` (the same: status lines on stderr, the answered question as JSON).
+# `question` (the same: status lines on stderr, the answered question as JSON). `get`'s
+# open comments go to stderr, so stdout stays the document byte for byte.
 #
 # Needs an ACCOUNT credential (personal access token, sbt_): slates belong to a person in
 # an org, so an app-scoped deploy token (sbd_) is refused by the server. The profile's
@@ -434,6 +451,93 @@ cmd_get() {
     cat "$tmp"      # to stdout the same way: `get ID > f` then `put ID f` is a no-op too
     rm -f "$tmp"
   fi
+  # Whoever reads the page reads what its readers said about it. Only with the head: the
+  # comments are about the slate as it stands, not about a version someone went back for.
+  [ -n "$version" ] || _open_comments "$sid"
+  return 0
+}
+
+# _open_comments ID — the slate's open comment threads on stderr, as the platform words and
+# fences them for its own AI (text/plain). Best effort and silent: a slate with nothing
+# open, an older installation without the route, or a failed call must never fail the
+# `get` that already delivered the page — so it runs in a subshell, where neither an exit
+# nor the globals substrait_call sets reach the caller.
+_open_comments() (
+  substrait_call GET "/api/slates/$1/comments?raw=1" 2>/dev/null || exit 0
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || exit 0
+  case "$SUBSTRAIT_BODY" in
+    *"<<<COMMENTS"*) ;;
+    *) exit 0 ;;      # nothing open — or not the answer this expects (an old server's JSON)
+  esac
+  {
+    echo ""
+    echo "Open comments on slate $1 (\`comments $1\` lists them all; \`comment $1 --reply N …\` answers one):"
+    printf '%s\n' "$SUBSTRAIT_BODY"
+  } >&2
+  exit 0
+)
+
+# Comments: notes on one section of the slate (or on the whole page), written by anyone who
+# may comment and read by everyone who may view. Never part of the page — no version is
+# made — and a person a comment names is told. The server decides who may do what; a 403's
+# detail says which level is missing.
+cmd_comments() {
+  _need_id "${1:-}" "comments ID"
+  substrait_call GET "/api/slates/$1/comments" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the comments on slate $1"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+cmd_comment() {
+  local sid="${1:-}"; shift || true
+  local use="comment ID [--section HEADING] [--to EMAIL]... [--reply COMMENT_ID] TEXT..."
+  _need_id "$sid" "$use"
+  local section="" reply="" emails="" text=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --section) _need_value $# --section; section="$2"; shift 2 ;;
+      --to)      _need_value $# --to
+                 emails="${emails:+$emails,}$(substrait_json_str "$2")"; shift 2 ;;
+      --reply)   _need_value $# --reply; reply="$2"; shift 2 ;;
+      --)        shift; text="$*"; break ;;
+      -*)        die "unknown option: $1" ;;
+      *)         text="${text:+$text }$1"; shift ;;
+    esac
+  done
+  [ -n "$text" ] || die "say what the comment is: $use"
+  local body
+  body="{\"body\":$(substrait_json_str "$text"),\"mention_emails\":[$emails]"
+  if [ -n "$reply" ]; then
+    _is_int "$reply" || die "--reply takes the number of the comment that opened the thread"
+    # A reply is on its thread's section: naming another would be dropped by the server.
+    [ -z "$section" ] || die "a reply stays on its thread's section — leave --section out"
+    body="$body,\"parent_id\":$reply"
+  elif [ -n "$section" ]; then
+    body="$body,\"section\":$(substrait_json_str "$section")"
+  fi
+  substrait_call POST "/api/slates/$sid/comments" -H "Content-Type: application/json" \
+    -d "$body}" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "201" ] || _fail "Commenting on slate $sid"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+  echo "Commented on slate $sid — the page was not changed." >&2
+}
+
+# _thread_state ID COMMENT_ID resolve|reopen
+_thread_state() {
+  _need_id "${1:-}" "$3 ID COMMENT_ID"
+  _is_int "${2:-}" || die "usage: $3 ID COMMENT_ID"
+  substrait_call POST "/api/slates/$1/comments/$2/$3" || exit $?
+  local doing="Resolving"; [ "$3" = resolve ] || doing="Reopening"
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "$doing comment $2 on slate $1"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+cmd_resolve() { _thread_state "${1:-}" "${2:-}" resolve; }
+cmd_reopen()  { _thread_state "${1:-}" "${2:-}" reopen; }
+
+cmd_mentions() {
+  substrait_call GET "/api/slates/mentions" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the comments that name you"
+  printf '%s\n' "$SUBSTRAIT_BODY"
 }
 
 # The server's rule (`slates._DOCTYPE`: ^\s*<!doctype\s+html, case-insensitive), so a
@@ -551,6 +655,11 @@ case "${1:-}" in
   ask)      shift; cmd_ask "$@" ;;
   question) shift; cmd_question "$@" ;;
   questions) shift; cmd_questions "$@" ;;
+  comments) shift; cmd_comments "$@" ;;
+  comment)  shift; cmd_comment "$@" ;;
+  resolve)  shift; cmd_resolve "$@" ;;
+  reopen)   shift; cmd_reopen "$@" ;;
+  mentions) shift; cmd_mentions "$@" ;;
   history)  shift; cmd_history "$@" ;;
   versions) shift; cmd_versions "$@" ;;
   get)      shift; cmd_get "$@" ;;
@@ -560,5 +669,5 @@ case "${1:-}" in
   rules)    shift; cmd_rules "$@" ;;
   mode)     shift; cmd_mode "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, history, versions, get, put, rules, mode, open, kv)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, history, versions, get, put, rules, mode, open, kv)" ;;
 esac

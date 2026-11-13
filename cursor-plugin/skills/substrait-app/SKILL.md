@@ -96,7 +96,8 @@ driver (a **MySQL** driver for `oceanbase`), and keep all schema in Flyway migra
 
 An app has up to two instances, each with its own namespace, database, bucket, variables
 and URL. **A new app starts in `dev`** — `https://<slug>--dev.<org>.apps.substrait.build`,
-always behind sign-in for the organisation — and has no production until its owner
+behind sign-in for the organisation unless the organisation's admin lets apps turn that
+off (the app's Sharing tab says which; never assume `dev` is private) — and has no production until its owner
 **goes live** (the portal's Go live, or `/substrait:deploy promote --to production`). A
 bare `/substrait:deploy` goes to the app's default environment, which stays `dev` after
 going live; production is reached with `--env production` or by promoting. Older apps

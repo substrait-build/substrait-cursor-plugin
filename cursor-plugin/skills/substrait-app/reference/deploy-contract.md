@@ -358,7 +358,7 @@ VITE_SENTRY_DSN=https://abc@o0.ingest.sentry.io/0
 ### Environments and seed data
 
 An app runs as one or two **environments** — `dev` (where a new app starts, at
-`<slug>--dev.<org>.apps.substrait.build`, always behind organisation sign-in) and
+`<slug>--dev.<org>.apps.substrait.build`, behind organisation sign-in unless the organisation's admin lets apps turn it off) and
 `production` (`<slug>.<org>.apps.substrait.build`, created when the owner goes live).
 Each is a full, separate instance: its own namespace, database, object-storage bucket,
 variables and secrets. Nothing in the zip is per environment; the app learns where it is
