@@ -25,8 +25,9 @@ maintain a project-memory block and Cursor reads `AGENTS.md`, not the default `C
 **If any authentication has to be established below (account link or per-app token), the
 Substrait portal/API URL is REQUIRED — there is no default.** If the user supplied a URL
 as the command argument (`$ARGUMENTS`), use it; otherwise **ask the user for their
-Substrait portal/API URL** (e.g. `https://api.substrait.build` hosted, or a tenant/demo
-URL like `https://api.demo.substrait.build` — the portal's connect page shows it) and pass
+Substrait portal/API URL** (e.g. `https://api.pluto.substrait.build` for the Substrait cloud,
+or the installation's own API address such as `https://api.<installation>.substrait.build` —
+the portal's connect page shows it) and pass
 it as `--portal-url <URL>`. It's only needed when first writing auth to config; if the
 machine/project is already linked, skip straight to binding.
 

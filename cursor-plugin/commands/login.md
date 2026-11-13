@@ -12,7 +12,7 @@ machine-wide — every project on this machine can then browse the API Library
 Each login is saved as a **profile** — one Substrait installation (portal URL) as one org —
 in `~/.substrait/profiles/<name>.json`; the **active** profile is copied to
 `~/.substrait/config.json`. A person who works on two installations (say the hosted
-platform and a demo or self-hosted one), or in two orgs of one installation, keeps one
+Substrait cloud and a self-hosted one), or in two orgs of one installation, keeps one
 profile per login and switches between them; a login to a different installation or org
 never touches another profile, and a login under an existing profile's name **replaces**
 it (the token it replaces is revoked when a login minted it — a hand-minted one is kept
@@ -29,10 +29,10 @@ from there.
 - If `$ARGUMENTS` is the name of a saved profile instead (see step 0), the user wants to
   **switch** to it — skip to step 5.
 - Otherwise **ask the user for their Substrait portal/API URL** and wait for it — do NOT
-  guess or assume a hosted default. It's the API base, e.g. `https://api.substrait.build`
-  for the hosted platform, or a tenant/demo/self-hosted install's own URL such as
-  `https://api.demo.substrait.build`. The portal's own "connect" instructions show the
-  exact URL for that environment.
+  guess or assume a hosted default. It's the API base, e.g. `https://api.pluto.substrait.build`
+  for the Substrait cloud, or a self-hosted installation's own API address such as
+  `https://api.<installation>.substrait.build`. The portal's own "connect" instructions show
+  the exact URL for that installation.
 Pass it as `--portal-url <URL>` on the authorization command below. (Once stored, later
 commands read it from the profile — the URL is only needed here at login.)
 
