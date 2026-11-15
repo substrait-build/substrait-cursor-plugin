@@ -29,7 +29,9 @@ editor. The plugin bundles:
     documents, decks and interactive pages): ask for one from a brief, ask it to change,
     fetch its HTML to edit by hand, save it back as the next version, open it — and ask
     a question about one (what it says, what a figure means) without changing it, and
-    read, write and resolve the comments its readers leave on it.
+    read, write and resolve the comments its readers leave on it. A slate you own can
+    be deleted from here too — only when you ask for that slate by name, and it cannot
+    be undone.
     The page is written by Substrait's AI (on your organisation's AI key) or right here by
     Cursor (on your own usage) — whichever your organisation is set to; `mode` says which.
 

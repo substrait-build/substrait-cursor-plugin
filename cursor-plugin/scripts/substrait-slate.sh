@@ -75,12 +75,20 @@
 #   kv ID get KEY                      one value (JSON)
 #   kv ID set KEY JSON                 write one value (JSON text; `set k '"text"'` for a string)
 #   kv ID delete KEY                   remove one key
+#   delete ID [--yes]                  delete the slate, for good: its page and every
+#                                      version stop being served to everyone it is shared
+#                                      with, and it cannot be brought back — not from
+#                                      here, not from the portal. Only its owner may.
+#                                      WITHOUT --yes nothing is deleted: it prints which
+#                                      slate that is (JSON, as `show`) and what deleting
+#                                      it ends, and stops with exit 1. --yes deletes it
 #
 # Output is the API's JSON body untouched (the calling agent parses JSON natively; the
 # pure-shell _json_field helper can't walk arrays), except `get` (the document), the
 # --wait follow-up (one status line per poll on stderr, the final turn as JSON) and
 # `question` (the same: status lines on stderr, the answered question as JSON). `get`'s
-# open comments go to stderr, so stdout stays the document byte for byte.
+# open comments go to stderr, so stdout stays the document byte for byte. `delete` says
+# what it did — or, without --yes, what it did NOT do — on stderr.
 #
 # Needs an ACCOUNT credential (personal access token, sbt_): slates belong to a person in
 # an org, so an app-scoped deploy token (sbd_) is refused by the server. The profile's
@@ -645,6 +653,64 @@ cmd_open() {
   return 0
 }
 
+# delete ID [--yes] — the one command here that cannot be taken back, so it is the one
+# that does nothing unless told twice: the slate is read first either way (whoever runs
+# this sees WHICH slate the id is — its title, not a number — before or as it goes), and
+# without --yes that is all that happens. Who may delete is the server's rule (the owner;
+# 403 with its reason for anyone else): the level is said here, never decided here.
+cmd_delete() {
+  local sid="" yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes) yes=1; shift ;;
+      -*) die "unknown option: $1 (usage: delete ID [--yes])" ;;
+      *)
+        [ -z "$sid" ] || die "delete takes ONE slate at a time: delete ID [--yes]"
+        sid="$1"; shift ;;
+    esac
+  done
+  _need_id "$sid" "delete ID [--yes]"
+  substrait_call GET "/api/slates/$sid" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading slate $sid"
+  local slate="$SUBSTRAIT_BODY" title kind version level owner
+  title="$(printf '%s' "$slate" | _json_field title)" || title=""
+  kind="$(printf '%s' "$slate" | _json_field kind)" || kind="slate"
+  version="$(printf '%s' "$slate" | _json_field head_version)" || version="?"
+  level="$(printf '%s' "$slate" | _json_field viewer_level)" || level=""
+  owner="$(printf '%s' "$slate" | _json_field owner_name)" || owner=""
+  local what="slate $sid \"$title\" ($kind, version $version${owner:+, owned by $owner})"
+
+  if [ "$yes" != "1" ]; then
+    printf '%s\n' "$slate"
+    {
+      echo "NOT deleted: $what."
+      case "$(printf '%s' "$slate" | _json_field share_mode || true)" in
+        ""|private) ;;
+        *) echo "Everyone in the organisation can open it, and it is on Explore." ;;
+      esac
+      if printf '%s' "$slate" | grep -Eq '"public"[[:space:]]*:[[:space:]]*true'; then
+        echo "A public link to it is live."
+      fi
+      if printf '%s' "$slate" | grep -Eq '"active_turn"[[:space:]]*:[[:space:]]*\{'; then
+        echo "The AI is working on it right now: deleting it ends that."
+      fi
+      if [ -n "$level" ] && [ "$level" != "owner" ]; then
+        echo "You hold \"$level\" on it; only a slate's owner may delete it."
+      fi
+      echo "Deleting it cannot be undone: the page and every version stop being served to"
+      echo "everyone it is shared with (people named on it are not listed here — its Share"
+      echo "panel in the portal shows them), and its comments and history go with it."
+      echo "To delete THIS slate: delete $sid --yes"
+    } >&2
+    exit 1
+  fi
+
+  substrait_call DELETE "/api/slates/$sid" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Deleting $what"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+  echo "Deleted $what. It cannot be brought back." >&2
+}
+
 # The header comment, to its end — never the code after it.
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
@@ -668,6 +734,7 @@ case "${1:-}" in
   kv)       shift; cmd_kv "$@" ;;
   rules)    shift; cmd_rules "$@" ;;
   mode)     shift; cmd_mode "$@" ;;
+  delete)   shift; cmd_delete "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, history, versions, get, put, rules, mode, open, kv)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, history, versions, get, put, rules, mode, open, kv, delete)" ;;
 esac
