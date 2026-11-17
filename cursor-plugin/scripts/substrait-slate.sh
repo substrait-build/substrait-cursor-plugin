@@ -75,6 +75,26 @@
 #   kv ID get KEY                      one value (JSON)
 #   kv ID set KEY JSON                 write one value (JSON text; `set k '"text"'` for a string)
 #   kv ID delete KEY                   remove one key
+#   sharing ID                         who the slate is shared with (JSON): `share_mode`
+#                                      (private, or the whole organisation as org_view |
+#                                      org_comment | org_edit), `people`, `groups` (the
+#                                      organisation's roles), `owner`. Only its owner may
+#   share ID [--org private|view|comment|edit] [--to EMAIL]... [--role NAME]...
+#            [--as view|comment|edit]
+#                                      share the slate with people who sign in. --to: a
+#                                      member of the organisation, by email, who is told
+#                                      by the platform; --role: one of the organisation's
+#                                      roles, by its name in People (everyone who holds
+#                                      it; nobody is emailed); both get --as (default
+#                                      view), and naming someone already listed changes
+#                                      what they may do. --org: what EVERYONE in the
+#                                      organisation may do — anything but private also
+#                                      puts the slate on Explore and members' Home.
+#                                      Prints who it is shared with afterwards (JSON, as
+#                                      `sharing`). Only its owner may
+#   unshare ID [--to EMAIL]... [--role NAME]...
+#                                      take a person or a role off the slate (to close it
+#                                      to the whole organisation: share ID --org private)
 #   delete ID [--yes]                  delete the slate, for good: its page and every
 #                                      version stop being served to everyone it is shared
 #                                      with, and it cannot be brought back — not from
@@ -642,6 +662,102 @@ cmd_kv() {
   esac
 }
 
+# Sharing: who may open the slate — the whole organisation, its roles, people by name.
+# The slate's OWNER decides (the server's rule: 403 with its reason for anyone else), and
+# only among people who sign in: public links and handing the slate to a new owner stay in
+# the portal's Share panel. People are named by email and roles by name, which the server
+# resolves — there is no id to look up first.
+cmd_sharing() {
+  _need_id "${1:-}" "sharing ID"
+  substrait_call GET "/api/slates/$1/sharing" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading who slate $1 is shared with"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+# _share_one ID people|groups FIELD VALUE ROLE — one person (by email) or one role (by
+# name) set to ROLE, or taken off when ROLE is `null`. Leaves the sharing view in
+# SUBSTRAIT_BODY.
+_share_one() {
+  local role="null"
+  [ "$5" = "null" ] || role="\"$5\""
+  substrait_call PUT "/api/slates/$1/$2" -H "Content-Type: application/json" \
+    -d "{\"$3\":$(substrait_json_str "$4"),\"role\":$role}" || exit $?
+  if [ "${SUBSTRAIT_STATUS:-}" != "200" ]; then
+    if [ "$5" = "null" ]; then _fail "Taking $4 off slate $1"; else _fail "Sharing slate $1 with $4"; fi
+  fi
+}
+
+# share / unshare walk their arguments in order and make one call per name, so what was
+# done before a refusal stays done — each line on stderr says what landed.
+cmd_share() {
+  local sid="${1:-}"; shift || true
+  local use="share ID [--org private|view|comment|edit] [--to EMAIL]... [--role NAME]... [--as view|comment|edit]"
+  _need_id "$sid" "$use"
+  local as="view" org="" n=0 i
+  local -a kinds=() names=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)   _need_value $# --to;   kinds[n]="people"; names[n]="$2"; n=$((n + 1)); shift 2 ;;
+      --role) _need_value $# --role; kinds[n]="groups"; names[n]="$2"; n=$((n + 1)); shift 2 ;;
+      --as)   _need_value $# --as;   as="$2"; shift 2 ;;
+      --org)  _need_value $# --org;  org="$2"; shift 2 ;;
+      *) die "unknown argument: $1 (usage: $use)" ;;
+    esac
+  done
+  case "$as" in view|comment|edit) ;; *) die "--as must be view, comment or edit" ;; esac
+  local mode=""
+  case "$org" in
+    "") ;;
+    private) mode="private" ;;
+    view|comment|edit) mode="org_$org" ;;
+    *) die "--org must be private, view, comment or edit" ;;
+  esac
+  [ "$n" -gt 0 ] || [ -n "$mode" ] || die "say who to share with: $use"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    if [ "${kinds[i]}" = "people" ]; then
+      _share_one "$sid" people email "${names[i]}" "$as"
+      echo "Slate $sid: ${names[i]} can $as (the platform tells them when this is new or more than before)." >&2
+    else
+      _share_one "$sid" groups name "${names[i]}" "$as"
+      echo "Slate $sid: everyone who holds the role \"${names[i]}\" can $as." >&2
+    fi
+    i=$((i + 1))
+  done
+  if [ -n "$mode" ]; then
+    substrait_call PUT "/api/slates/$sid/sharing" -H "Content-Type: application/json" \
+      -d "{\"share_mode\":\"$mode\"}" || exit $?
+    [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Changing who in the organisation can open slate $sid"
+    if [ "$mode" = "private" ]; then
+      echo "Slate $sid: closed to the organisation as a whole and off Explore — the people and roles listed on it keep their access." >&2
+    else
+      echo "Slate $sid: everyone in the organisation can $org, and it is on Explore and members' Home." >&2
+    fi
+  fi
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+cmd_unshare() {
+  local sid="${1:-}"; shift || true
+  local use="unshare ID [--to EMAIL]... [--role NAME]..."
+  _need_id "$sid" "$use"
+  [ $# -gt 0 ] || die "say who to take off: $use (to close it to the whole organisation: share $sid --org private)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)   _need_value $# --to
+              _share_one "$sid" people email "$2" null
+              echo "Slate $sid: $2 is not listed on it (they may still reach it through a role or the organisation's share — \`sharing $sid\` shows)." >&2
+              shift 2 ;;
+      --role) _need_value $# --role
+              _share_one "$sid" groups name "$2" null
+              echo "Slate $sid: no longer shared with the role \"$2\"." >&2
+              shift 2 ;;
+      *) die "unknown argument: $1 (usage: $use)" ;;
+    esac
+  done
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
 cmd_open() {
   _need_id "${1:-}" "open ID"
   substrait_call GET "/api/slates/$1" || exit $?
@@ -735,6 +851,9 @@ case "${1:-}" in
   rules)    shift; cmd_rules "$@" ;;
   mode)     shift; cmd_mode "$@" ;;
   delete)   shift; cmd_delete "$@" ;;
+  sharing)  shift; cmd_sharing "$@" ;;
+  share)    shift; cmd_share "$@" ;;
+  unshare)  shift; cmd_unshare "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, history, versions, get, put, rules, mode, open, kv, delete)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, history, versions, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
 esac
