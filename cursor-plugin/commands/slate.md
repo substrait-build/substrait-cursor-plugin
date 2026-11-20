@@ -9,10 +9,11 @@ portal under **Slates**, are shared with colleagues, and are improved by asking 
 again. Each slate is one self-contained HTML document per version, shown by the portal in
 a sandboxed frame. This command lets the user make and change slates from here.
 
-**A slate's page is written in one of two places, and the user's organisation uses ONE
-of them.** Which one is the organisation's setting on the platform. It is changed only by
-the platform's administrators — not by the user, not by their organisation's own admins,
-and not from here — and the server refuses the other way.
+**A slate's page is written in one of two places, and the user's organisation says which
+are open: one of them, or both.** That is the organisation's setting on the platform. It is
+changed only by the platform's administrators — not by the user, not by their
+organisation's own admins, and not from here — and the server refuses a way the setting
+leaves out.
 
 - **`platform`** — you send the request (`new`, `ask`) and Substrait's own AI writes the
   page in the background, on the organisation's AI key. The portal shows the page being
@@ -21,17 +22,24 @@ and not from here — and the server refuses the other way.
   files, this conversation), and save it with the request it was written for
   (`new --from … --request`, `put … --request`). It runs on the user's own Cursor
   usage: the platform runs no model and nothing counts against the cap. The slate's
-  History records the request and what changed, exactly as for a platform turn, and the
-  portal shows the new version the moment it is saved (not while you write it).
+  History records the request, who asked and what changed, exactly as for a platform
+  turn, and the portal shows the new version the moment it is saved (not while you write
+  it).
+- **`both`** — either way is open, per request. **Write it yourself** (as in `editor`)
+  when the request draws on what you can see here and Substrait's AI cannot — the
+  project's files, this conversation, documents or notes the user has given you, your
+  tools — or when the user asks you to. Otherwise send it to Substrait's AI (as in
+  `platform`), which sees only the request's words. If the user says which one should
+  write it, do that.
 
-**Before you make or change a slate with AI, run `… mode`** — it prints `platform` or
-`editor` for the organisation the user is signed in to — and write the page that way.
-Read it each time; do not remember it from an earlier conversation or guess it. If the
-user asks for the other way ("write it yourself" in a `platform` organisation, "let
-Substrait write it" in an `editor` one), do not try it and do not work around it: tell
-them how their organisation is set, that only a platform administrator can change it, and
-offer to do the request the way the organisation allows. Say in your answer which one
-wrote the page.
+**Before you make or change a slate with AI, run `… mode`** — it prints `platform`,
+`editor` or `both` for the organisation the user is signed in to — and write the page
+that way. Read it each time; do not remember it from an earlier conversation or guess it.
+If the user asks for a way the setting leaves out ("write it yourself" in a `platform`
+organisation, "let Substrait write it" in an `editor` one), do not try it and do not work
+around it: tell them how their organisation is set, that only a platform administrator
+can change it, and offer to do the request the way the organisation allows. Say in your
+answer which one wrote the page.
 
 The bundled scripts live in this plugin's `scripts/` directory. Resolve the plugin root
 (if `$CURSOR_PLUGIN_ROOT` is set, use it; otherwise locate the directory containing
@@ -51,26 +59,26 @@ Work out what the user wants, then:
 2. **Make a new one.** Pick the kind from the request (a report/proposal/memo → `doc`;
    slides → `deck`; a calculator/tracker/checklist/dashboard → `page`); if it is unclear,
    ask ONE question.
-   **In a `platform` organisation:** `… new --kind doc|deck|page [--title "…"] "the request"`.
+   **Substrait's AI writes it** (a `platform` or `both` organisation): `… new --kind doc|deck|page [--title "…"] "the request"`.
    Write the request as a full brief — audience, sections or slides, tone, what must be
    in it — the AI writes the first version from it alone. Add `--wait` when the user
    wants to see the result now: the script follows the turn (typically 30–90 s) and
    prints the final version number. Tell the user the `url` so they can open it.
-   **In an `editor` organisation:** read `… rules --kind doc|deck|page` FIRST and follow every
+   **You write it** (an `editor` or `both` organisation): read `… rules --kind doc|deck|page` FIRST and follow every
    rule in it (the viewer's content-security policy blocks anything else, silently). Write
    the whole page — ONE complete HTML document — to a scratch file (a temp directory, not
    the project, unless the user wants a copy kept), then
    `… new --kind doc|deck|page --from FILE [--title "…"] --request "<what the user asked,
    in their words>" --summary "<one sentence: what you wrote>"`. Tell the user the `url`.
    **From a file the user already has** (a deck exported by another tool, an HTML page
-   in the project — either kind of organisation): `… new --kind doc|deck|page --from FILE [--title "…"]` makes it
+   in the project — any organisation): `… new --kind doc|deck|page --from FILE [--title "…"]` makes it
    version 1 as it is — no request, no AI turn, ready at once. FILE must be ONE complete
    HTML document starting with `<!DOCTYPE html>` with everything inline or from the CDNs
    the viewer allows (as in step 4; linked local images or stylesheets will not load).
    The title is FILE's `<title>` unless `--title` says. No `--request`: nobody asked for
    this file just now. Changes come afterwards.
 
-3. **Change one — in a `platform` organisation.** `… ask ID [--wait] "what should change"`. A turn is queued behind any
+3. **Change one — Substrait's AI writes it** (a `platform` or `both` organisation). `… ask ID [--wait] "what should change"`. A turn is queued behind any
    turn already running on that slate; `--wait` follows it. **With a file:**
    `… ask ID --attach FILE "insert these slides after the agenda"` sends FILE with the
    request as material for the AI — the HTML of slides to bring into a deck, notes or a
@@ -81,11 +89,11 @@ Work out what the user wants, then:
    The platform's AI reads the slate's open comments with the page (step 8), so "deal with
    the comments on the Budget section" is a request it can carry out.
 
-4. **Change one — in an `editor` organisation.** Always start from the page as it is NOW,
+4. **Change one — you write it** (an `editor` or `both` organisation). Always start from the page as it is NOW,
    never from a copy you fetched earlier: other people, their own AI and the page itself
    (a checklist ticked in the browser) all make versions.
    - `… show ID` — the `kind`, and `active_turn`: if the platform's AI is still working
-     on the slate (a turn asked before the organisation's setting changed), tell the user
+     on the slate (in a `both` organisation, or a turn asked before the setting changed), tell the user
      and wait for it rather than racing it. `… history ID` — what was asked before; a
      standing instruction in it (a tone, an audience, a name for something) still holds.
    - `… get ID --out FILE` — writes the current page and says which version it is (N).
@@ -101,10 +109,11 @@ Work out what the user wants, then:
      "<one sentence: what changed>"`. A **409** means the slate moved on while you worked:
      `get` again, redo the change on the current page, `put` again with the new base —
      never overwrite, never merge blindly. Say which version landed.
-   **By hand — either kind of organisation** (the user edits the file themselves, or
+   **By hand — any organisation** (the user edits the file themselves, or
    wants a file saved as it is): the same `get` / `put ID FILE --base N`, with no
    `--request` — the version is then recorded as edited by hand. This is for the user's
-   own edit: never use it to save a page YOU wrote in a `platform` organisation.
+   own edit: never use it to save a page YOU wrote — in a `platform` organisation you do not write
+   one, and anywhere else that is `put … --request`.
 
 5. **Open it.** `… open ID` prints the portal page's URL and opens it in the browser.
 
@@ -116,7 +125,7 @@ Work out what the user wants, then:
 7. **Answer a question about one.** When the user wants to KNOW something about a slate —
    what it says, what a figure means, a summary, what is missing — and has not asked for
    it to change, answer the question; do not change the page.
-   **In a `platform` organisation:** `… question ID "the question, as the user put it"`.
+   **In a `platform` or `both` organisation:** `… question ID "the question, as the user put it"`.
    Substrait's AI reads the page as it is now and answers; the script waits (usually a few
    seconds) and prints the question as JSON — `answer` is Markdown, `version` the version
    it was answered from. Give the user the answer. A follow-up is another `question`: the

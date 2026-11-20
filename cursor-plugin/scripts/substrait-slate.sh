@@ -3,13 +3,14 @@
 # Substrait platform (the portal's /slates). Create one from a request, ask it to change,
 # pull its HTML to a file, push a hand-edited file back as the next version, and open it.
 #
-# A slate's page is WRITTEN in one of two places, and an organisation uses ONE of them:
+# A slate's page is WRITTEN in one of two places; an organisation uses one of them, or both:
 #   on the platform   `new REQUEST` / `ask` — Substrait's AI writes it, on the org's AI key
 #   in the editor     the AI in this editor writes the HTML itself (`rules` says what a page
 #                     must be) and saves it with the request it was written for:
 #                     `new --from FILE --request …` / `put ID FILE --request …`
-# Which one is the ORGANISATION's setting, kept on the platform and changed only by the
-# platform's administrators — `mode` reads it, and the server refuses the other way.
+# Which is the ORGANISATION's setting (`platform`, `editor` or `both`), kept on the platform
+# and changed only by the platform's administrators — `mode` reads it, and the server
+# refuses a way the setting leaves out.
 #
 #   list                               my slates, and the ones shared with me (JSON)
 #   new --kind doc|deck|page [--title T] [--wait] REQUEST...
@@ -68,7 +69,7 @@
 #   rules [--kind doc|deck|page]       what a slate's page must be (plain text) — read it
 #                                      before writing one here
 #   mode                               where this organisation's slates are written:
-#                                      `platform` or `editor` (one word). Read it before
+#                                      `platform`, `editor` or `both` (one word). Read it before
 #                                      writing; it is not set from here
 #   open ID                            print the slate's portal page (and open it)
 #   kv ID list                         the slate's store: every key and value (JSON)
@@ -171,7 +172,7 @@ _request_json() {
   printf ',"client":"%s"}' "$(_client)"
 }
 
-# Where this organisation's slates are written — `platform` or `editor`. The setting is
+# Where this organisation's slates are written — `platform`, `editor` or `both`. The setting is
 # the organisation's, kept on the platform and changed only by the platform's
 # administrators: nothing on this machine holds or overrides it, and the server refuses
 # the other way whatever a client sends.
@@ -184,6 +185,7 @@ cmd_mode() {
   case "$place" in
     platform) echo "This organisation's slates are written on the platform, by Substrait's AI: use \`new REQUEST\` / \`ask\`." >&2 ;;
     editor)   echo "This organisation's slates are written here in the editor: write the page (see \`rules\`) and save it with \`new --from FILE --request …\` / \`put ID FILE --request …\`." >&2 ;;
+    both)     echo "This organisation's slates are written either way: by Substrait's AI (\`new REQUEST\` / \`ask\`), or here in the editor (see \`rules\`; save with \`new --from FILE --request …\` / \`put ID FILE --request …\`)." >&2 ;;
     *) die "unexpected answer from the platform: $SUBSTRAIT_BODY" ;;
   esac
   printf '%s\n' "$place"
