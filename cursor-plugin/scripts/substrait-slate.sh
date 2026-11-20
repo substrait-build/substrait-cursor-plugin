@@ -57,14 +57,14 @@
 #                                      show or asked for (`shared`) (JSON)
 #   fields ID                          what of slate ID can be linked: its sections and the
 #                                      keys of its store (JSON)
-#   link ID --from SOURCE_ID (--section HEADING [--nth N] | --key KEY)
+#   link-field ID --from SOURCE_ID (--section HEADING [--nth N] | --key KEY)
 #                                      show one section, or one store value, of slate
 #                                      SOURCE_ID in slate ID, live. Needs "can edit" on ID
 #                                      and "can view" on SOURCE_ID. It shows at once if you
 #                                      can edit SOURCE_ID; otherwise someone who can is
 #                                      asked to agree (in the portal). Prints the link with
 #                                      the placeholder element to put in the page
-#   unlink ID LINK_ID                  take a linked field away from slate ID
+#   unlink-field ID LINK_ID            take a linked field away from slate ID
 #   history ID                         what was asked, newest first (JSON)
 #   versions ID                        the versions (JSON)
 #   get ID [--version N] [--out FILE]  the page's HTML — the head, or version N — to
@@ -616,7 +616,7 @@ cmd_fields() {
 
 cmd_link() {
   local sid="${1:-}"; shift || true
-  local use="link ID --from SOURCE_ID (--section HEADING [--nth N] | --key KEY)"
+  local use="link-field ID --from SOURCE_ID (--section HEADING [--nth N] | --key KEY)"
   _need_id "$sid" "$use"
   local from="" section="" key="" nth="0"
   while [ $# -gt 0 ]; do
@@ -638,14 +638,14 @@ cmd_link() {
   else
     die "name ONE field: --section HEADING or --key KEY. usage: $use"
   fi
-  substrait_call POST "/api/slates/$sid/field-links" "$body" || exit $?
+  substrait_call POST "/api/slates/$sid/field-links" -H "Content-Type: application/json" -d "$body" || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "201" ] || _fail "Linking the field"
   printf '%s\n' "$SUBSTRAIT_BODY"
 }
 
 cmd_unlink() {
-  _need_id "${1:-}" "unlink ID LINK_ID"
-  _need_id "${2:-}" "unlink ID LINK_ID"
+  _need_id "${1:-}" "unlink-field ID LINK_ID"
+  _need_id "${2:-}" "unlink-field ID LINK_ID"
   substrait_call DELETE "/api/slates/$1/field-links/$2" || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "204" ] || _fail "Removing the linked field"
   echo "Removed linked field $2 from slate $1. A placeholder for it left in the page now shows a note; take it out with the next change." >&2
@@ -933,8 +933,10 @@ case "${1:-}" in
   mentions) shift; cmd_mentions "$@" ;;
   links)    shift; cmd_links "$@" ;;
   fields)   shift; cmd_fields "$@" ;;
-  link)     shift; cmd_link "$@" ;;
-  unlink)   shift; cmd_unlink "$@" ;;
+  link-field)   shift; cmd_link "$@" ;;
+  unlink-field) shift; cmd_unlink "$@" ;;
+  # `link` is /substrait:link — a project folder to an app — never a slate command.
+  link|unlink)  die "a slate's linked fields are \`link-field\` and \`unlink-field\` (\`link\` on its own is /substrait:link, which links this folder to an app)" ;;
   history)  shift; cmd_history "$@" ;;
   versions) shift; cmd_versions "$@" ;;
   get)      shift; cmd_get "$@" ;;
@@ -948,5 +950,5 @@ case "${1:-}" in
   share)    shift; cmd_share "$@" ;;
   unshare)  shift; cmd_unshare "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link, unlink, history, versions, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link-field, unlink-field, history, versions, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
 esac
