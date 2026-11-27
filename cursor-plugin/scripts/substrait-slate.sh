@@ -66,7 +66,15 @@
 #                                      the placeholder element to put in the page
 #   unlink-field ID LINK_ID            take a linked field away from slate ID
 #   history ID                         what was asked, newest first (JSON)
-#   versions ID                        the versions (JSON)
+#   versions ID [--milestones]         the versions (JSON), newest first. Each carries
+#                                      `milestone`: the name an editor gave it ("Sent to
+#                                      client"), who marked it and when — or null. Every
+#                                      milestone is listed, however old; --milestones
+#                                      lists them alone
+#   milestone ID VERSION NAME          name version VERSION as a milestone, or rename
+#                                      the milestone it is (needs "can edit"); the
+#                                      version itself does not change
+#   milestone ID VERSION --remove      take the milestone mark off; the version stays
 #   get ID [--version N] [--out FILE]  the page's HTML — the head, or version N — to
 #                                      stdout or FILE (with --out, says which version it
 #                                      wrote: the --base a change to it is saved on).
@@ -271,9 +279,35 @@ cmd_history() {
 }
 
 cmd_versions() {
-  _need_id "${1:-}" "versions ID"
-  substrait_call GET "/api/slates/$1/versions" || exit $?
+  _need_id "${1:-}" "versions ID [--milestones]"
+  local query=""
+  case "${2:-}" in
+    "") ;;
+    --milestones) query="?milestones=true" ;;
+    *) die "unknown option: $2 (usage: versions ID [--milestones])" ;;
+  esac
+  substrait_call GET "/api/slates/$1/versions$query" || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the versions of slate $1"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+cmd_milestone() {
+  local usage="milestone ID VERSION NAME | milestone ID VERSION --remove"
+  _need_id "${1:-}" "$usage"
+  _is_int "${2:-}" || die "usage: $usage"
+  local sid="$1" version="$2"
+  shift 2
+  [ $# -ge 1 ] || die "usage: $usage (a name, such as \"Sent to client\")"
+  if [ "$1" = "--remove" ]; then
+    [ $# -eq 1 ] || die "usage: $usage"
+    substrait_call DELETE "/api/slates/$sid/versions/$version/milestone" || exit $?
+    [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Removing the milestone on version $version of slate $sid"
+  else
+    substrait_call PUT "/api/slates/$sid/versions/$version/milestone" \
+      -H "Content-Type: application/json" \
+      -d "{\"name\":$(substrait_json_str "$*")}" || exit $?
+    [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Marking version $version of slate $sid as a milestone"
+  fi
   printf '%s\n' "$SUBSTRAIT_BODY"
 }
 
@@ -939,6 +973,7 @@ case "${1:-}" in
   link|unlink)  die "a slate's linked fields are \`link-field\` and \`unlink-field\` (\`link\` on its own is /substrait:link, which links this folder to an app)" ;;
   history)  shift; cmd_history "$@" ;;
   versions) shift; cmd_versions "$@" ;;
+  milestone) shift; cmd_milestone "$@" ;;
   get)      shift; cmd_get "$@" ;;
   put)      shift; cmd_put "$@" ;;
   open)     shift; cmd_open "$@" ;;
@@ -950,5 +985,5 @@ case "${1:-}" in
   share)    shift; cmd_share "$@" ;;
   unshare)  shift; cmd_unshare "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link-field, unlink-field, history, versions, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link-field, unlink-field, history, versions, milestone, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
 esac

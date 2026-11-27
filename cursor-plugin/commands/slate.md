@@ -85,7 +85,8 @@ Work out what the user wants, then:
    spec to write a section from, any text. The AI renders what it says in the slate's own
    style; it is not `put` (which replaces the page with the file as it is). The AI edits in place for a
    small change and rewrites the page for a large one — either way the result is a new
-   version and the old ones stay (see `… versions ID`; `… history ID` is what was asked).
+   version and the old ones stay (see `… versions ID` and its milestones, step 12;
+   `… history ID` is what was asked).
    The platform's AI reads the slate's open comments with the page (step 8), so "deal with
    the comments on the Budget section" is a request it can carry out.
 
@@ -236,6 +237,18 @@ Work out what the user wants, then:
     - `… unlink-field ID LINK_ID` takes a link away; take its placeholder out of the page too.
     - Agreeing to share a field of a slate, declining, and ending a share are done in the
       portal by people who can edit the source, not here.
+
+12. **Milestones.** An editor can name a version that mattered — "Sent to client",
+   "Agreed at the review" — so it stands out among the many a slate collects.
+   `… versions ID` lists every version, newest first, each with `milestone` (its name, who
+   marked it and when, or null) — every milestone is listed, however old — and
+   `… versions ID --milestones` lists the milestones alone. When the user refers to a
+   version by what happened to it ("the one we sent the client", "like the agreed
+   version"), look for it among the milestones, then `… get ID --version N`.
+   `… milestone ID VERSION "NAME"` names a version or renames its milestone;
+   `… milestone ID VERSION --remove` takes the mark off. Neither changes the version, and
+   a milestone is restored like any version (in the portal). Mark one only when the user
+   asks for it.
 
 Things to keep straight:
 - Slates are **not apps**: nothing here deploys anything. If the user wants the page to
