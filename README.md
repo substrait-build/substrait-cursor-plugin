@@ -37,6 +37,10 @@ editor. The plugin bundles:
 
 ## Install
 
+Cursor has no install command, so the plugin is added in three clicks. (The prompt Substrait's
+portal gives you to paste into your coding agent says the same: in Cursor, the agent hands
+these steps back to you.)
+
 In Cursor, add the marketplace and install the plugin:
 
 ```
