@@ -13,11 +13,16 @@
 # refuses a way the setting leaves out.
 #
 #   list                               my slates, and the ones shared with me (JSON)
-#   new --kind doc|deck|page [--title T] [--wait] REQUEST...
+#   new --kind doc|deck|page [--title T] [--design NAME|none] [--wait] REQUEST...
 #                                      a new slate from one request; the first version is
 #                                      written by the AI in the background (--wait follows
-#                                      it to the end and prints the result)
-#   new --kind doc|deck|page --from FILE [--title T] [--request TEXT [--summary TEXT]]
+#                                      it to the end and prints the result).
+#                                      --design: the design the slate is written to — one
+#                                      of the organisation's (`designs` lists them), or
+#                                      `none` for no design system. Left out: the
+#                                      organisation's default design
+#   new --kind doc|deck|page --from FILE [--title T] [--design NAME|none]
+#       [--request TEXT [--summary TEXT]]
 #                                      a new slate from an HTML document you already have:
 #                                      FILE is version 1 as it is, no AI turn runs (the
 #                                      title is FILE's <title> unless --title says).
@@ -91,8 +96,18 @@
 #                                      --request: the change was written here for TEXT —
 #                                      kept in the slate's history with --summary (one
 #                                      line saying what changed)
-#   rules [--kind doc|deck|page]       what a slate's page must be (plain text) — read it
-#                                      before writing one here
+#   rules [--kind doc|deck|page] [--design NAME|none]
+#   rules --slate ID                   what a slate's page must be (plain text) — read it
+#                                      before writing one here. The rules END with the
+#                                      design the page is written to: with --slate, that
+#                                      slate's own (and its kind); else the design a NEW
+#                                      slate would follow (--design as for `new`)
+#   designs                            the organisation's slate designs, one per line:
+#                                      ID <tab> NAME <tab> `default` on the default one
+#   design ID NAME|none|default        change which design a slate follows (edit access):
+#                                      one of the organisation's by name, `none` for no
+#                                      design system, `default` for the organisation's
+#                                      default. The page changes when an AI next writes it
 #   mode                               where this organisation's slates are written:
 #                                      `platform`, `editor` or `both` (one word). Read it before
 #                                      writing; it is not set from here
@@ -216,19 +231,72 @@ cmd_mode() {
   printf '%s\n' "$place"
 }
 
+# _urlencode TEXT — percent-encode a value for a query string, byte by byte (a design's
+# name may hold spaces, & and letters of any script).
+_urlencode() {
+  local LC_ALL=C text="$1" out="" c i
+  for ((i = 0; i < ${#text}; i++)); do
+    c="${text:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out="$out$c" ;;
+      *) out="$out$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# The rules END with the design the page is written to. For a slate that exists, its own
+# (--slate ID: its kind too); for one about to be made, the design it WILL follow —
+# --design NAME|none, or the organisation's default when left out. The same value goes to
+# `new --design`, or the page is written to one design and the slate follows another.
 cmd_rules() {
-  local kind="doc"
+  local kind="doc" design="" slate="" use="rules [--kind doc|deck|page] [--design NAME|none] | rules --slate ID"
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind) _need_value $# --kind; kind="$2"; shift 2 ;;
+      --design) _need_value $# --design; design="$2"; shift 2 ;;
+      --slate) _need_value $# --slate; slate="$2"; shift 2 ;;
       doc|deck|page) kind="$1"; shift ;;
-      *) die "usage: rules [--kind doc|deck|page]" ;;
+      *) die "usage: $use" ;;
     esac
   done
   case "$kind" in doc|deck|page) ;; *) die "--kind must be doc, deck or page" ;; esac
-  substrait_call GET "/api/slates/rules?kind=$kind&raw=1" || exit $?
+  local query="kind=$kind&raw=1"
+  if [ -n "$slate" ]; then
+    _is_int "$slate" || die "usage: $use"
+    [ -z "$design" ] || die "--slate reads the design that slate follows; --design is for a slate not made yet"
+    query="$query&slate=$slate"
+  elif [ -n "$design" ]; then
+    query="$query&design=$(_urlencode "$design")"
+  fi
+  substrait_call GET "/api/slates/rules?$query" || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the page rules"
   printf '%s\n' "$SUBSTRAIT_BODY"
+}
+
+# The organisation's slate designs: what `new --design` and `design` take by name.
+cmd_designs() {
+  [ $# -eq 0 ] || die "usage: designs"
+  substrait_call GET "/api/slates/designs?raw=1" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Reading the organisation's designs"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+  case "$SUBSTRAIT_BODY" in
+    -*) echo "This organisation has no design of its own: a slate is written to the standard Substrait design, or to none (\`--design none\`)." >&2 ;;
+    *)  echo "A slate follows the one marked default unless \`new --design NAME\` names another, or \`--design none\` for no design system." >&2 ;;
+  esac
+}
+
+cmd_design() {
+  local use="design ID NAME|none|default"
+  _need_id "${1:-}" "$use"
+  [ $# -ge 2 ] || die "usage: $use (\`designs\` lists the organisation's)"
+  local sid="$1"; shift
+  local choice="$*"
+  substrait_call PUT "/api/slates/$sid/design" -H "Content-Type: application/json" \
+    -d "{\"design\":$(substrait_json_str "$choice")}" || exit $?
+  [ "${SUBSTRAIT_STATUS:-}" = "200" ] || _fail "Changing the design of slate $sid"
+  printf '%s\n' "$SUBSTRAIT_BODY"
+  echo "Slate $sid: design set to $choice. The page itself changes when an AI next writes it — read \`rules --slate $sid\` before you do." >&2
 }
 
 # _follow SLATE_ID TURN_ID — poll the turn until it ends. One line per poll on stderr; the
@@ -312,11 +380,12 @@ cmd_milestone() {
 }
 
 cmd_new() {
-  local kind="" title="" wait=0 prompt="" from="" request="" summary=""
+  local kind="" title="" wait=0 prompt="" from="" request="" summary="" design=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind)  _need_value $# --kind; kind="$2"; shift 2 ;;
       --title) _need_value $# --title; title="$2"; shift 2 ;;
+      --design) _need_value $# --design; design="$2"; shift 2 ;;
       --from)  _need_value $# --from; from="$2"; shift 2 ;;
       --request) _need_value $# --request; request="$2"; shift 2 ;;
       --summary) _need_value $# --summary; summary="$2"; shift 2 ;;
@@ -332,7 +401,7 @@ cmd_new() {
     *)  die "--kind must be doc, deck or page" ;;
   esac
   if [ -n "$from" ]; then
-    _import "$kind" "$title" "$from" "$prompt" "$wait" "$request" "$summary"
+    _import "$kind" "$title" "$from" "$prompt" "$wait" "$request" "$summary" "$design"
     return
   fi
   # No file: the platform writes it, from the request given as the argument.
@@ -341,6 +410,7 @@ cmd_new() {
   local body
   body="{\"kind\":\"$kind\",\"prompt\":$(substrait_json_str "$prompt")"
   [ -n "$title" ] && body="$body,\"title\":$(substrait_json_str "$title")"
+  [ -n "$design" ] && body="$body,\"design\":$(substrait_json_str "$design")"
   body="$body}"
   substrait_call POST "/api/slates" -H "Content-Type: application/json" -d "$body" || exit $?
   [ "${SUBSTRAIT_STATUS:-}" = "201" ] || _fail "Creating the slate"
@@ -363,6 +433,7 @@ cmd_new() {
 # --wait has nothing to follow.
 _import() {
   local kind="$1" title="$2" file="$3" prompt="$4" wait="$5" request="$6" summary="$7"
+  local design="${8:-}"
   [ -z "$prompt" ] || die "--from imports FILE as it is. If FILE was written here for that request, say so: --request \"<request>\"; to have the platform change it, ask afterwards: ask ID \"<request>\""
   [ "$wait" = 1 ] && die "--wait follows an AI turn; --from runs none (the slate is ready at once)"
   [ -z "$summary" ] || [ -n "$request" ] || die "--summary says what a request changed; give --request too"
@@ -373,6 +444,7 @@ _import() {
   {
     printf '{"kind":"%s"' "$kind"
     [ -n "$title" ] && printf ',"title":%s' "$(substrait_json_str "$title")"
+    [ -n "$design" ] && printf ',"design":%s' "$(substrait_json_str "$design")"
     [ -n "$request" ] && printf ',"request":%s' "$(_request_json "$request" "$summary")"
     printf ',"html":'
     substrait_json_file_str "$file"
@@ -979,11 +1051,13 @@ case "${1:-}" in
   open)     shift; cmd_open "$@" ;;
   kv)       shift; cmd_kv "$@" ;;
   rules)    shift; cmd_rules "$@" ;;
+  designs)  shift; cmd_designs "$@" ;;
+  design)   shift; cmd_design "$@" ;;
   mode)     shift; cmd_mode "$@" ;;
   delete)   shift; cmd_delete "$@" ;;
   sharing)  shift; cmd_sharing "$@" ;;
   share)    shift; cmd_share "$@" ;;
   unshare)  shift; cmd_unshare "$@" ;;
   -h|--help|help|"") usage ;;
-  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link-field, unlink-field, history, versions, milestone, get, put, rules, mode, open, kv, sharing, share, unshare, delete)" ;;
+  *) die "unknown command: $1 (try: list, new, show, ask, question, questions, comments, comment, resolve, reopen, mentions, links, fields, link-field, unlink-field, history, versions, milestone, get, put, rules, designs, design, mode, open, kv, sharing, share, unshare, delete)" ;;
 esac

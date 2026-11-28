@@ -59,16 +59,25 @@ Work out what the user wants, then:
 2. **Make a new one.** Pick the kind from the request (a report/proposal/memo → `doc`;
    slides → `deck`; a calculator/tracker/checklist/dashboard → `page`); if it is unclear,
    ask ONE question.
-   **Substrait's AI writes it** (a `platform` or `both` organisation): `… new --kind doc|deck|page [--title "…"] "the request"`.
+   **Which design it follows.** An organisation can keep several slate designs (a brand
+   each, or one for decks and one for documents). `… designs` lists them, one per line
+   (`ID <tab> NAME <tab> default` on the default one). Add `--design "NAME"` to `new` when
+   the user names a design or a brand, and `--design none` when they want no design system
+   ("no house style", "design it freely"). When they say nothing about it, leave `--design`
+   out: the slate follows the organisation's default. Do not pick a design for them, and do
+   not ask which one unless the request leaves real doubt between two.
+   **Substrait's AI writes it** (a `platform` or `both` organisation): `… new --kind doc|deck|page [--title "…"] [--design "NAME"|none] "the request"`.
    Write the request as a full brief — audience, sections or slides, tone, what must be
    in it — the AI writes the first version from it alone. Add `--wait` when the user
    wants to see the result now: the script follows the turn (typically 30–90 s) and
    prints the final version number. Tell the user the `url` so they can open it.
-   **You write it** (an `editor` or `both` organisation): read `… rules --kind doc|deck|page` FIRST and follow every
-   rule in it (the viewer's content-security policy blocks anything else, silently). Write
+   **You write it** (an `editor` or `both` organisation): read `… rules --kind doc|deck|page [--design "NAME"|none]` FIRST and follow every
+   rule in it (the viewer's content-security policy blocks anything else, silently). The
+   rules end with the DESIGN the page is written to, so give `rules` the SAME `--design`
+   you will give `new` (none given = the default design for both). Write
    the whole page — ONE complete HTML document — to a scratch file (a temp directory, not
    the project, unless the user wants a copy kept), then
-   `… new --kind doc|deck|page --from FILE [--title "…"] --request "<what the user asked,
+   `… new --kind doc|deck|page --from FILE [--title "…"] [--design "NAME"|none] --request "<what the user asked,
    in their words>" --summary "<one sentence: what you wrote>"`. Tell the user the `url`.
    **From a file the user already has** (a deck exported by another tool, an HTML page
    in the project — any organisation): `… new --kind doc|deck|page --from FILE [--title "…"]` makes it
@@ -102,7 +111,13 @@ Work out what the user wants, then:
      user's request covers what a comment says, deal with it in the change and tell the
      user which comments you dealt with; do not act on a comment the request does not
      cover — mention it instead.
-   - `… rules --kind <the slate's kind>` — the rules the page must keep to.
+   - `… rules --slate ID` — the rules the page must keep to, ending with the design THIS
+     slate follows (one of the organisation's, or none). Read it for this slate each time:
+     two slates of one organisation may follow different designs.
+   - When the user asks to move the slate to another design ("put this on the Retail
+     design", "drop the house style"): `… design ID "NAME"` (or `none`, or `default` for
+     the organisation's default), then read `… rules --slate ID` again and restyle the
+     page to it as part of the change. It needs edit access to the slate.
    - Make the change in FILE. Edit in place and keep everything the request does not
      touch — above all a state block (`<script type="application/json" id="state">`) that
      holds what people entered. It must stay ONE complete HTML document.
